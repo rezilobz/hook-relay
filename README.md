@@ -247,6 +247,12 @@ The `Event` table carries a `status` column (`pending` / `delivered` / `partiall
 
 Redis is a natural fit for several features in this system: caching API keys (v0.4 multi-tenancy), per-endpoint rate limiting (v0.2), and circuit breaker state (v0.2). It is deliberately excluded from v0.1 because none of those features are being built yet, and adding Redis now means adding an operational dependency — another service to run, monitor, and back up — with no current payoff. All v0.1 use cases (idempotency checks, auth) are served adequately by PostgreSQL with proper indexes at the target scale. The isolation is intentional: idempotency logic lives in `worker/delivery.py` and auth in `api/dependencies.py`, so a Redis cache layer can be inserted in front of either without structural changes when the time comes.
 
+### Why does Alembic use the async engine instead of a separate psycopg2 engine?
+
+The traditional Alembic setup uses a synchronous `psycopg2` engine for migrations and a separate `asyncpg` engine for the running application. This avoids asyncio complexity in migration scripts at the cost of maintaining two DB drivers as dependencies.
+
+HookRelay uses a single driver (`asyncpg`) for both. Alembic's async migration support (`async_engine_from_config` + `asyncio.run()`) has been stable since Alembic 1.x and is the approach recommended in the official Alembic async documentation. The `migrations/env.py` constructs its own engine from the Alembic config at migration time, independent of the application engine in `db/engine.py`. No psycopg2 dependency, no dual-driver maintenance.
+
 ### Why are delivery workers a separate process from the API?
 
 The ingestion API and the delivery workers have different scaling profiles: you might run two API replicas behind a load balancer while running ten worker instances to increase delivery throughput. If they shared a process, they could only scale together. Running them as separate OS processes — the API via `uvicorn`, the workers via a dedicated `hookrelay-worker` entry point — also means a worker crash or Kafka consumer rebalance does not affect API availability, and vice versa.
