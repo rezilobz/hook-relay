@@ -52,7 +52,7 @@ HookRelay solves these problems with a Kafka-backed architecture purpose-built f
                         │  │  Control    │     ┌──────────▼───────────────┐   │
                         │  │  Plane API  │     │                          │   │
                         │  │  (FastAPI)  │     │   Delivery Worker Pool   │   │
-                        │  │             │     │                          │   │ 
+                        │  │             │     │                          │   │
                         │  │  /endpoints │     │  ┌────────────────────┐  │   │
                         │  │  /events    │     │  │  Retry Scheduler   │  │   │
                         │  │  /deliveries│     │  │  (exp. backoff)    │  │   │
@@ -116,7 +116,7 @@ git clone https://github.com/rezilobz/hook-relay.git
 cd hook-relay
 cp .env.example .env
 make install-dev
-docker compose up -d
+make up
 ```
 
 The control plane API is available at `http://localhost:8000`. Grafana at `http://localhost:3000`.
