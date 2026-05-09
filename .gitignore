@@ -1,0 +1,58 @@
+# ─── Python ───────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# ─── UV / virtualenv ──────────────────────────────────────────────────────────
+.venv/
+venv/
+.python-version
+# uv.lock is intentionally committed for reproducible installs
+
+# ─── Testing / coverage ───────────────────────────────────────────────────────
+.pytest_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+.tox/
+
+# ─── mypy ─────────────────────────────────────────────────────────────────────
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# ─── ruff ─────────────────────────────────────────────────────────────────────
+.ruff_cache/
+
+# ─── Environment variables ────────────────────────────────────────────────────
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# ─── Docker ───────────────────────────────────────────────────────────────────
+docker-compose.override.yml
+
+# ─── IDE / Editor ─────────────────────────────────────────────────────────────
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# ─── Distribution / packaging ─────────────────────────────────────────────────
+*.tar.gz
+*.whl
+
+# ─── Logs ─────────────────────────────────────────────────────────────────────
+*.log
+logs/

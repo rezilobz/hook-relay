@@ -2,6 +2,7 @@
 
 **Self-hosted webhook delivery infrastructure. Built for reliability, not hope.**
 
+[![CI](https://github.com/rezilobz/hook-relay/actions/workflows/ci.yml/badge.svg)](https://github.com/rezilobz/hook-relay/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Python](https://img.shields.io/badge/Python-3.12+-blue.svg)](https://www.python.org/)
 [![Kafka](https://img.shields.io/badge/Backbone-Kafka-231F20?logo=apachekafka)](https://kafka.apache.org/)
@@ -102,17 +103,20 @@ HookRelay solves these problems with a Kafka-backed architecture purpose-built f
 - **Per-endpoint filtering** — Endpoints subscribe to specific event types. Unsubscribed events are never routed to them.
 - **Full delivery audit trail** — Every attempt (success, failure, timeout) is logged with timestamp, HTTP status, response body (truncated), and latency.
 - **Prometheus metrics** — First-class observability, not an afterthought. Ships with a Grafana dashboard definition.
-- **Docker Compose** — Full local stack (API, workers, Kafka, Zookeeper, PostgreSQL, Prometheus, Grafana) in a single command.
+- **Docker Compose** — Full local stack (API, workers, Kafka, PostgreSQL, Prometheus, Grafana) in a single command.
 
 ---
 
 ## Quickstart
 
+**Prerequisites:** Python 3.12+, [UV](https://docs.astral.sh/uv/), Docker, Docker Compose.
+
 ```bash
-git clone https://github.com/yourhandle/hookrelay.git
-cd hookrelay
+git clone https://github.com/rezilobz/hook-relay.git
+cd hook-relay
 cp .env.example .env
-docker compose up
+make install-dev
+docker compose up -d
 ```
 
 The control plane API is available at `http://localhost:8000`. Grafana at `http://localhost:3000`.
@@ -288,12 +292,13 @@ A Grafana dashboard definition is included at `infra/grafana/dashboard.json`.
 Contributions are welcome. For significant changes, please open an issue first to discuss scope and approach. All PRs require passing tests and updated documentation.
 
 ```bash
-# Run the test suite
-pytest tests/ -v
-
-# Run with coverage
-pytest tests/ --cov=hookrelay --cov-report=term-missing
+make install-dev   # install deps + pre-commit hooks
+make test          # run unit tests
+make test-cov      # run tests with coverage report
+make check         # lint + format check + type check
 ```
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the full guide.
 
 ---
 

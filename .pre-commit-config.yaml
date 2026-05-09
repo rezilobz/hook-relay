@@ -1,0 +1,40 @@
+repos:
+  # Use local hooks via `uv run` so versions always match pyproject.toml
+  - repo: local
+    hooks:
+      - id: ruff-lint
+        name: ruff lint
+        entry: uv run ruff check --fix
+        language: system
+        types: [python]
+        require_serial: false
+
+      - id: ruff-format
+        name: ruff format
+        entry: uv run ruff format
+        language: system
+        types: [python]
+        require_serial: false
+
+      - id: mypy
+        name: mypy
+        entry: uv run mypy
+        language: system
+        types: [python]
+        files: ^src/
+        args: ["--config-file=pyproject.toml"]
+        require_serial: true
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.6.0
+    hooks:
+      - id: check-yaml
+      - id: check-toml
+      - id: check-json
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+      - id: check-merge-conflict
+      - id: check-added-large-files
+        args: ["--maxkb=500"]
+      - id: no-commit-to-branch
+        args: ["--branch", "main"]

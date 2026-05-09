@@ -1,0 +1,17 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]
+
+  # Scrapes the HookRelay app running on the host machine.
+  # host.docker.internal resolves to the Docker host from inside a container.
+  # When the app runs inside Docker Compose, change this to the service name (e.g. hookrelay-api:8000).
+  - job_name: hookrelay
+    static_configs:
+      - targets: ["host.docker.internal:8000"]
+    metrics_path: /metrics
+    scrape_interval: 5s

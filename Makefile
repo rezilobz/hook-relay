@@ -1,0 +1,82 @@
+.DEFAULT_GOAL := help
+.PHONY: help install install-dev lint format format-check typecheck check \
+        test test-integration test-cov up down down-volumes logs \
+        migrate migrate-new db-shell clean
+
+UV  := uv
+SRC := src/hookrelay
+TST := tests
+
+help: ## Show available targets
+	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
+		| sort \
+		| awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-20s\033[0m %s\n", $$1, $$2}'
+
+# ─── Dependencies ─────────────────────────────────────────────────────────────
+
+install: ## Install runtime dependencies only
+	$(UV) sync --no-dev
+
+install-dev: ## Install all dependencies (runtime + dev + test + lint) and pre-commit hooks
+	$(UV) sync --group dev --group test --group lint
+	$(UV) run pre-commit install
+
+# ─── Code quality ─────────────────────────────────────────────────────────────
+
+lint: ## Run ruff linter
+	$(UV) run ruff check $(SRC) $(TST)
+
+format: ## Auto-format code with ruff
+	$(UV) run ruff format $(SRC) $(TST)
+
+format-check: ## Check formatting without modifying files (used in CI)
+	$(UV) run ruff format --check $(SRC) $(TST)
+
+typecheck: ## Run mypy type checker on source only
+	$(UV) run mypy $(SRC)
+
+check: lint format-check typecheck ## Run all static analysis (no file modification)
+
+# ─── Tests ────────────────────────────────────────────────────────────────────
+
+test: ## Run unit tests (no infrastructure required)
+	$(UV) run pytest $(TST) -m "not integration" -v
+
+test-integration: ## Run integration tests (requires Docker Compose stack)
+	$(UV) run pytest $(TST) -m "integration" -v
+
+test-cov: ## Run unit tests with HTML coverage report
+	$(UV) run pytest $(TST) -m "not integration" \
+		--cov=$(SRC) --cov-report=term-missing --cov-report=html
+
+# ─── Infrastructure ───────────────────────────────────────────────────────────
+
+up: ## Start infrastructure services (postgres, kafka, prometheus, grafana)
+	docker compose up -d
+
+down: ## Stop infrastructure services
+	docker compose down
+
+down-volumes: ## Stop services and delete all persistent data (destructive)
+	docker compose down -v
+
+logs: ## Tail logs for all infrastructure services
+	docker compose logs -f
+
+# ─── Database ─────────────────────────────────────────────────────────────────
+
+migrate: ## Run pending Alembic migrations
+	$(UV) run alembic upgrade head
+
+migrate-new: ## Create a new Alembic migration (usage: make migrate-new MSG="describe change")
+	$(UV) run alembic revision --autogenerate -m "$(MSG)"
+
+db-shell: ## Open a psql shell in the local Docker PostgreSQL container
+	docker compose exec postgres psql -U hookrelay -d hookrelay
+
+# ─── Cleanup ──────────────────────────────────────────────────────────────────
+
+clean: ## Remove Python caches and build artifacts
+	find . -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
+	find . -type f -name "*.pyc" -delete
+	rm -rf .pytest_cache .mypy_cache .ruff_cache htmlcov .coverage dist build
