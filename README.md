@@ -219,6 +219,42 @@ API keys in webhook headers can be logged by intermediaries (load balancers, pro
 
 Kafka is not a database. Using it as one — querying delivery history by endpoint, filtering attempts by status, computing per-endpoint failure rates — would require either maintaining a consumer that projects Kafka events into a queryable store (which is just a database with extra steps) or abusing consumer group offset tracking as a query mechanism. PostgreSQL is the right tool for structured, queryable state. Kafka is the right tool for durable, ordered event transport. HookRelay uses both for what they're each good at.
 
+### Why resolve endpoint fan-out at consumption, not at ingestion?
+
+When an event arrives, it may match multiple registered endpoints. The fan-out could happen at two points: immediately at ingestion (publish one Kafka message per matching endpoint) or lazily at consumption (publish one message per event, let the worker resolve matching endpoints).
+
+Fan-out at ingestion keeps the worker simple but couples the ingestion API to a database query on every request — which breaks the intent of responding immediately with no synchronous work. It also means endpoints registered after an event was published can never receive it, even if the event is replayed. Fan-out at consumption keeps ingestion pure: receive event, publish one message, return. The worker resolves current matching endpoints at processing time, which means replays and late-registered endpoints work correctly. The `DeliveryAttempt` table — one row per `(event, endpoint, attempt)` — is the natural representation of this model.
+
+### Why asyncio tasks instead of a thread pool for delivery workers?
+
+A common misconception: Python's GIL prevents threads from running Python code in parallel, but it is released during I/O operations. This means thread pools *can* achieve real concurrency for I/O-bound work like HTTP delivery — a thread waiting on a network response is not holding the GIL. So both approaches work. Asyncio wins for different reasons: it is consistent with the rest of the stack (`aiokafka`, `httpx`, and SQLAlchemy async are all async-native), coroutines have far lower memory overhead than threads (~KB vs ~8MB stack per unit), cooperative switching at `await` points is cheaper than OS-level context switching, and there are no shared-state concurrency bugs to reason about. `WORKER_CONCURRENCY` controls the number of concurrent asyncio delivery tasks, not threads.
+
+### Why check the idempotency key at ingestion, not only at delivery?
+
+Idempotency is enforced at two layers. At ingestion, a `UNIQUE` constraint on `idempotency_key` combined with `INSERT ... ON CONFLICT DO NOTHING` rejects duplicate events before they enter Kafka — a clean system state with no redundant messages. At delivery, the worker checks for an existing successful `DeliveryAttempt` record before making the HTTP call, which handles the case where a worker crashes after delivery but before committing the Kafka offset and the event is re-processed on restart.
+
+The ingestion check adds roughly 1–3ms of latency (one indexed DB roundtrip). This is acceptable: the ingestion endpoint is already an HTTP call with network round-trip latency, and allowing duplicates into Kafka is not free either — they burn worker capacity, Kafka storage, and produce spurious delivery records.
+
+### Why is the HMAC signature computed at delivery time, not stored at ingestion?
+
+The HMAC-SHA256 signature sent in `X-HookRelay-Signature` is computed as `HMAC(payload, endpoint.secret)`. If the signature were pre-computed at ingestion and stored, rotating an endpoint's secret would immediately invalidate all stored signatures for un-delivered events — replayed or retried events would arrive with a signature the consumer's new secret cannot verify. Computing the signature fresh at delivery time means the current secret is always used, regardless of when the event was originally ingested. Secret rotation works correctly with no special handling.
+
+### Why is event status both stored and derived?
+
+The `Event` table carries a `status` column (`pending` / `delivered` / `partially_delivered` / `dlq`) for fast list queries. Without it, `GET /events` would require joining against `DeliveryAttempt` and aggregating per event — expensive at scale. However, a stored field can drift out of sync if a worker crashes mid-update. The resolution: the stored `status` is a read cache updated asynchronously by workers, but the source of truth is always the `DeliveryAttempt` records. `GET /events/{id}` (single event detail) derives status fresh from attempts. `GET /events` (list) uses the stored field. Inconsistencies are transient and self-correcting as workers complete.
+
+### Why not Redis in v0.1?
+
+Redis is a natural fit for several features in this system: caching API keys (v0.4 multi-tenancy), per-endpoint rate limiting (v0.2), and circuit breaker state (v0.2). It is deliberately excluded from v0.1 because none of those features are being built yet, and adding Redis now means adding an operational dependency — another service to run, monitor, and back up — with no current payoff. All v0.1 use cases (idempotency checks, auth) are served adequately by PostgreSQL with proper indexes at the target scale. The isolation is intentional: idempotency logic lives in `worker/delivery.py` and auth in `api/dependencies.py`, so a Redis cache layer can be inserted in front of either without structural changes when the time comes.
+
+### Why are delivery workers a separate process from the API?
+
+The ingestion API and the delivery workers have different scaling profiles: you might run two API replicas behind a load balancer while running ten worker instances to increase delivery throughput. If they shared a process, they could only scale together. Running them as separate OS processes — the API via `uvicorn`, the workers via a dedicated `hookrelay-worker` entry point — also means a worker crash or Kafka consumer rebalance does not affect API availability, and vice versa.
+
+### Why random Kafka partitioning (no ordering guarantee per endpoint)?
+
+Partitioning Kafka messages by `endpoint_id` would ensure all events for a given endpoint land in the same partition and are processed sequentially — guaranteeing delivery order. The tradeoff is head-of-line blocking: if one endpoint is slow or down, its entire partition stalls while other endpoints wait. Random (round-robin) partitioning maximises worker parallelism at the cost of ordering guarantees. For most webhook use cases, strict delivery ordering is not a requirement — consumers should be idempotent regardless. Ordered delivery per endpoint is a candidate feature for a future version, implementable by adding a partition-by-`endpoint_id` mode alongside a sequential delivery option in the worker.
+
 ---
 
 ## Configuration
