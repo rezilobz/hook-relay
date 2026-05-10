@@ -3,7 +3,6 @@
 **Self-hosted webhook delivery infrastructure. Built for reliability, not hope.**
 
 [![CI](https://github.com/rezilobz/hook-relay/actions/workflows/ci.yml/badge.svg)](https://github.com/rezilobz/hook-relay/actions/workflows/ci.yml)
-[![codecov](https://codecov.io/github/rezilobz/hook-relay/graph/badge.svg?token=DLYG99NMDC)](https://codecov.io/github/rezilobz/hook-relay)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Python](https://img.shields.io/badge/Python-3.12+-blue.svg)](https://www.python.org/)
 [![Kafka](https://img.shields.io/badge/Backbone-Kafka-231F20?logo=apachekafka)](https://kafka.apache.org/)
