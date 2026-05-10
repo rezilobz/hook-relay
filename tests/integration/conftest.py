@@ -1,13 +1,32 @@
 from collections.abc import AsyncGenerator, Generator
+from unittest.mock import patch
 
 import pytest
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engine
 from testcontainers.postgres import PostgresContainer
 
+from hookrelay.api.dependencies import get_producer as get_producer_dep
 from hookrelay.db.models import Base
 from hookrelay.db.session import get_db
 from hookrelay.main import create_app
+
+
+class FakeProducer:
+    def __init__(self, *, should_fail: bool = False) -> None:
+        self.published: list[tuple[str, dict]] = []
+        self.should_fail = should_fail
+
+    async def start(self) -> None:
+        pass
+
+    async def stop(self) -> None:
+        pass
+
+    async def publish(self, topic: str, message: dict) -> None:
+        if self.should_fail:
+            raise RuntimeError("Kafka unavailable")
+        self.published.append((topic, message))
 
 
 @pytest.fixture(scope="session")
@@ -30,13 +49,60 @@ async def async_engine(postgres_url: str) -> AsyncGenerator[AsyncEngine, None]:
 
 
 @pytest.fixture()
-async def client(async_engine: AsyncEngine) -> AsyncGenerator[AsyncClient, None]:
+async def db(async_engine: AsyncEngine) -> AsyncGenerator[AsyncSession, None]:
+    async with AsyncSession(async_engine, expire_on_commit=False) as session:
+        yield session
+
+
+@pytest.fixture()
+def fake_producer() -> FakeProducer:
+    return FakeProducer()
+
+
+@pytest.fixture()
+def failing_producer() -> FakeProducer:
+    return FakeProducer(should_fail=True)
+
+
+def _make_client(
+    async_engine: AsyncEngine,
+    producer: FakeProducer,
+    *,
+    raise_server_exceptions: bool = True,
+) -> AsyncClient:
     app = create_app()
 
     async def override_get_db() -> AsyncGenerator[AsyncSession, None]:
         async with AsyncSession(async_engine, expire_on_commit=False) as session:
             yield session
 
+    async def override_get_producer() -> FakeProducer:
+        return producer
+
     app.dependency_overrides[get_db] = override_get_db
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
-        yield ac
+    app.dependency_overrides[get_producer_dep] = override_get_producer
+
+    return AsyncClient(
+        transport=ASGITransport(app, raise_app_exceptions=raise_server_exceptions),  # type: ignore[arg-type]
+        base_url="http://test",
+    )
+
+
+@pytest.fixture()
+async def client(
+    async_engine: AsyncEngine, fake_producer: FakeProducer
+) -> AsyncGenerator[AsyncClient, None]:
+    with patch("hookrelay.main.HookRelayProducer", new=lambda: fake_producer):
+        async with _make_client(async_engine, fake_producer) as ac:
+            yield ac
+
+
+@pytest.fixture()
+async def failing_client(
+    async_engine: AsyncEngine, failing_producer: FakeProducer
+) -> AsyncGenerator[AsyncClient, None]:
+    with patch("hookrelay.main.HookRelayProducer", new=lambda: failing_producer):
+        async with _make_client(
+            async_engine, failing_producer, raise_server_exceptions=False
+        ) as ac:
+            yield ac
