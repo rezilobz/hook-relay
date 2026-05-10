@@ -6,6 +6,7 @@ from fastapi import FastAPI
 from prometheus_client import make_asgi_app as make_prometheus_asgi_app
 
 from hookrelay import __version__
+from hookrelay.api.routers import endpoints as endpoints_router
 
 logger = structlog.get_logger()
 
@@ -24,6 +25,7 @@ def create_app() -> FastAPI:
         version=__version__,
         lifespan=lifespan,
     )
+    app.include_router(endpoints_router.router)
     metrics_app = make_prometheus_asgi_app()
     app.mount("/metrics", metrics_app)
     return app

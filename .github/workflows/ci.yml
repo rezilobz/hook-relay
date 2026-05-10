@@ -80,8 +80,8 @@ jobs:
       - name: Install test dependencies
         run: uv sync --group test
 
-      - name: Run unit tests
-        run: uv run pytest tests/ -m "not integration" -v --cov=src/hookrelay --cov-report=xml
+      - name: Run tests
+        run: uv run pytest tests/ -v --cov=src/hookrelay --cov-report=xml
 
       - name: Upload coverage
         uses: codecov/codecov-action@v4
