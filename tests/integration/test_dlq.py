@@ -4,6 +4,7 @@ import uuid
 
 import pytest
 from httpx import AsyncClient
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from hookrelay.config import settings
@@ -145,6 +146,58 @@ class TestReplayDLQEntry:
         entry = await _seed_dlq_entry(db)
         resp = await client.post(f"/dlq/{entry.id}/replay")
         assert resp.status_code == 422
+
+
+# ─── POST /dlq/{id}/replay — Kafka failure (publish-before-commit contract) ───
+
+
+@pytest.mark.integration
+class TestReplayDLQEntryKafkaFailure:
+    """Verify that a Kafka publish failure leaves the DLQ entry intact (atomic rollback).
+
+    The DB-work-before-publish ordering means: if producer.publish() raises,
+    the exception propagates before db.commit() is called, the SQLAlchemy session
+    is closed without committing, and the delete is rolled back. The caller gets a
+    500 and can safely replay the same entry again.
+    """
+
+    async def test_kafka_failure_returns_500(
+        self, failing_client: AsyncClient, db: AsyncSession
+    ) -> None:
+        entry = await _seed_dlq_entry(db)
+
+        resp = await failing_client.post(f"/dlq/{entry.id}/replay", headers=AUTH)
+
+        assert resp.status_code == 500
+
+    async def test_kafka_failure_does_not_remove_dlq_entry(
+        self, failing_client: AsyncClient, db: AsyncSession
+    ) -> None:
+        entry = await _seed_dlq_entry(db)
+        entry_id = entry.id  # capture before expire_all invalidates the instance
+
+        await failing_client.post(f"/dlq/{entry.id}/replay", headers=AUTH)
+
+        db.expire_all()
+        result = await db.execute(select(DLQEntry).where(DLQEntry.id == entry_id))
+        assert result.scalar_one_or_none() is not None
+
+    async def test_replay_after_kafka_failure_succeeds(
+        self,
+        failing_client: AsyncClient,
+        client: AsyncClient,
+        db: AsyncSession,
+        fake_producer: FakeProducer,
+    ) -> None:
+        entry = await _seed_dlq_entry(db)
+        # First attempt: Kafka down, DLQ entry rolled back.
+        await failing_client.post(f"/dlq/{entry.id}/replay", headers=AUTH)
+
+        # Second attempt (Kafka up): entry was not removed, so replay must succeed.
+        resp = await client.post(f"/dlq/{entry.id}/replay", headers=AUTH)
+
+        assert resp.status_code == 200
+        assert len(fake_producer.published) == 1
 
 
 # ─── DELETE /dlq/{id} ─────────────────────────────────────────────────────────
