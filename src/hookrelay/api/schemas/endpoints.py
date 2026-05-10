@@ -21,8 +21,8 @@ class EndpointCreate(BaseModel):
 class EndpointUpdate(BaseModel):
     url: AnyHttpUrl | None = None
     description: str | None = None
-    event_types: list[str] | None = None
-    secret: str | None = None
+    event_types: Annotated[list[str], Field(min_length=1)] | None = None
+    secret: Annotated[str, Field(min_length=1)] | None = None
     enabled: bool | None = None
 
     @field_serializer("url")
