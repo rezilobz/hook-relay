@@ -247,6 +247,14 @@ The `Event` table carries a `status` column (`pending` / `delivered` / `partiall
 
 Redis is a natural fit for several features in this system: caching API keys (v0.4 multi-tenancy), per-endpoint rate limiting (v0.2), and circuit breaker state (v0.2). It is deliberately excluded from v0.1 because none of those features are being built yet, and adding Redis now means adding an operational dependency — another service to run, monitor, and back up — with no current payoff. All v0.1 use cases (idempotency checks, auth) are served adequately by PostgreSQL with proper indexes at the target scale. The isolation is intentional: idempotency logic lives in `worker/delivery.py` and auth in `api/dependencies.py`, so a Redis cache layer can be inserted in front of either without structural changes when the time comes.
 
+### Why publish to Kafka before committing, not after?
+
+Publishing before commit means a Kafka failure rolls back the DB transaction — the event is never persisted without a corresponding worker signal. The client gets a 500 and can safely retry with the same idempotency key, which will be treated as a fresh insert.
+
+The reverse failure mode — DB commit failing after a successful Kafka publish — produces an orphan message for an `event_id` that was never committed. The worker queries the DB for that `event_id`, finds nothing, and skips the message. The client sees a 500 and retries; the idempotency key insert lands cleanly since the first transaction rolled back.
+
+This trade-off is deliberate: DB commit failures are orders of magnitude rarer than Kafka failures, and both failure modes have safe recovery paths. The alternative — an outbox table committed in the same transaction, with a background publisher retrying — eliminates the dual-write gap entirely but adds a polling process, distributed locking (`FOR UPDATE SKIP LOCKED`), and a new table. That operational complexity is not justified given the rarity of the failure and the acceptable recovery behaviour.
+
 ### Why does Alembic use the async engine instead of a separate psycopg2 engine?
 
 The traditional Alembic setup uses a synchronous `psycopg2` engine for migrations and a separate `asyncpg` engine for the running application. This avoids asyncio complexity in migration scripts at the cost of maintaining two DB drivers as dependencies.
@@ -310,7 +318,6 @@ A Grafana dashboard definition is included at `infra/grafana/dashboard.json`.
 - [ ] Prometheus metrics
 
 ### v0.2 — Operational hardening
-- [ ] Outbox pattern for atomic event ingestion (eliminate dual-write gap)
 - [ ] Retry deduplication token (prevent duplicate Kafka messages on concurrent manual retries)
 - [ ] Per-endpoint rate limiting (protect slow consumers)
 - [ ] Circuit breaker per endpoint (auto-disable consistently failing endpoints)
