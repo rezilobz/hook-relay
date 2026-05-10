@@ -311,6 +311,8 @@ A Grafana dashboard definition is included at `infra/grafana/dashboard.json`.
 - [ ] Prometheus metrics
 
 ### v0.2 — Operational hardening
+- [ ] Outbox pattern for atomic event ingestion (eliminate dual-write gap)
+- [ ] Retry deduplication token (prevent duplicate Kafka messages on concurrent manual retries)
 - [ ] Per-endpoint rate limiting (protect slow consumers)
 - [ ] Circuit breaker per endpoint (auto-disable consistently failing endpoints)
 - [ ] Bulk event ingestion endpoint
