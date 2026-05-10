@@ -3,14 +3,14 @@
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import select, text
+from sqlalchemy import delete, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from hookrelay import metrics
 from hookrelay.api.dependencies import DB, Producer, require_api_key
 from hookrelay.api.schemas.events import DeliveryAttemptResponse, EventCreate, EventResponse
 from hookrelay.config import settings
-from hookrelay.db.models import DeliveryAttempt, Event
+from hookrelay.db.models import DeliveryAttempt, DLQEntry, Event
 
 router = APIRouter(
     prefix="/events",
@@ -119,6 +119,7 @@ async def retry_event(event_id: uuid.UUID, db: DB, producer: Producer) -> Event:
         raise HTTPException(status_code=404, detail="Event not found")
 
     await producer.publish(settings.kafka_topic_pending, {"event_id": str(event.id)})
+    await db.execute(delete(DLQEntry).where(DLQEntry.event_id == event_id))
     event.status = "pending"
     await db.commit()
     await db.refresh(event)

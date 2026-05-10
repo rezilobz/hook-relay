@@ -234,6 +234,49 @@ class TestRetryEvent:
         resp = await client.post(f"/events/{created['id']}/retry")
         assert resp.status_code == 422
 
+    async def test_clears_dlq_entries_for_event(
+        self, client: AsyncClient, db: AsyncSession, fake_producer: FakeProducer
+    ) -> None:
+        created = await _ingest(client)
+        ep = await _seed_endpoint(db)
+        eid = uuid.UUID(created["id"])
+        await _seed_dlq(db, event_id=eid, endpoint_id=ep.id)
+
+        await client.post(f"/events/{created['id']}/retry", headers=AUTH)
+
+        db.expire_all()
+        result = await db.execute(select(DLQEntry).where(DLQEntry.event_id == eid))
+        assert result.scalars().all() == []
+
+    async def test_clears_all_dlq_entries_across_multiple_endpoints(
+        self, client: AsyncClient, db: AsyncSession, fake_producer: FakeProducer
+    ) -> None:
+        created = await _ingest(client)
+        ep_a, ep_b = await _seed_endpoint(db), await _seed_endpoint(db)
+        eid = uuid.UUID(created["id"])
+        await _seed_dlq(db, event_id=eid, endpoint_id=ep_a.id)
+        await _seed_dlq(db, event_id=eid, endpoint_id=ep_b.id)
+
+        await client.post(f"/events/{created['id']}/retry", headers=AUTH)
+
+        db.expire_all()
+        result = await db.execute(select(DLQEntry).where(DLQEntry.event_id == eid))
+        assert result.scalars().all() == []
+
+    async def test_derived_status_is_pending_after_retry_from_dlq(
+        self, client: AsyncClient, db: AsyncSession, fake_producer: FakeProducer
+    ) -> None:
+        created = await _ingest(client)
+        ep = await _seed_endpoint(db)
+        eid = uuid.UUID(created["id"])
+        await _seed_attempt(db, event_id=eid, endpoint_id=ep.id, status="failure")
+        await _seed_dlq(db, event_id=eid, endpoint_id=ep.id)
+
+        await client.post(f"/events/{created['id']}/retry", headers=AUTH)
+        resp = await client.get(f"/events/{created['id']}", headers=AUTH)
+
+        assert resp.json()["status"] == "pending"
+
 
 # ─── GET /events/{id} — derived status ───────────────────────────────────────
 
