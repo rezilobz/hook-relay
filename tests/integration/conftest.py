@@ -2,7 +2,6 @@ from collections.abc import AsyncGenerator, Generator
 
 import pytest
 from httpx import ASGITransport, AsyncClient
-from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engine
 from testcontainers.postgres import PostgresContainer
 
@@ -26,7 +25,7 @@ async def async_engine(postgres_url: str) -> AsyncGenerator[AsyncEngine, None]:
         await conn.run_sync(Base.metadata.create_all)
     yield engine
     async with engine.begin() as conn:
-        await conn.execute(text("TRUNCATE TABLE endpoints CASCADE"))
+        await conn.run_sync(Base.metadata.drop_all)
     await engine.dispose()
 
 
