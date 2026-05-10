@@ -5,7 +5,9 @@ import uuid
 import pytest
 from httpx import AsyncClient
 
-AUTH = {"X-API-Key": "dev-secret"}
+from hookrelay.config import settings
+
+AUTH = {settings.api_key_header: settings.api_key}
 
 VALID_BODY = {
     "url": "https://example.com/webhook",
