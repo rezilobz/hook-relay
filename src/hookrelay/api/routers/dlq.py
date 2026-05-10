@@ -31,7 +31,7 @@ async def list_dlq(
 
 @router.post("/{dlq_id}/replay", response_model=DLQEntryResponse)
 async def replay_dlq_entry(dlq_id: uuid.UUID, db: DB, producer: Producer) -> DLQEntry:
-    entry = await db.get(DLQEntry, dlq_id)
+    entry = await db.get(DLQEntry, dlq_id, with_for_update=True)
     if entry is None:
         raise HTTPException(status_code=404, detail="DLQ entry not found")
 

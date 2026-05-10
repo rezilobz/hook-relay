@@ -114,7 +114,7 @@ async def get_event_deliveries(event_id: uuid.UUID, db: DB) -> list[DeliveryAtte
 
 @router.post("/{event_id}/retry", response_model=EventResponse)
 async def retry_event(event_id: uuid.UUID, db: DB, producer: Producer) -> Event:
-    event = await db.get(Event, event_id)
+    event = await db.get(Event, event_id, with_for_update=True)
     if event is None:
         raise HTTPException(status_code=404, detail="Event not found")
 
