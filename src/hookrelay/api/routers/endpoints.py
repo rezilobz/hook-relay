@@ -46,7 +46,7 @@ async def update_endpoint(endpoint_id: uuid.UUID, body: EndpointUpdate, db: DB) 
     endpoint = result.scalar_one_or_none()
     if endpoint is None:
         raise HTTPException(status_code=404, detail="Endpoint not found")
-    updates = body.model_dump(mode="json", exclude_none=True)
+    updates = body.model_dump(mode="json", exclude_unset=True)
     for field, value in updates.items():
         setattr(endpoint, field, value)
     await db.flush()
