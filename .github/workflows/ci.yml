@@ -82,12 +82,9 @@ jobs:
         run: uv sync --group test
 
       - name: Run tests
-        run: uv run pytest tests/ -v --cov=src/hookrelay --cov-report=xml
+        run: uv run pytest tests/ -v --cov=src/hookrelay --cov-report=term-missing
 
-      - name: Upload coverage
-        uses: codecov/codecov-action@v5
-        if: always()
-        with:
-          files: coverage.xml
-          fail_ci_if_error: false
-          token: ${{ secrets.CODECOV_TOKEN }}
+      - name: Coverage summary
+        run: |
+          echo "## Coverage" >> $GITHUB_STEP_SUMMARY
+          uv run coverage report --format=markdown >> $GITHUB_STEP_SUMMARY
