@@ -1,6 +1,6 @@
 .DEFAULT_GOAL := help
 .PHONY: help install install-dev lint format format-check typecheck check \
-        test test-integration test-cov up down down-volumes logs \
+        test test-unit test-cov up down down-volumes logs \
         migrate migrate-new db-shell clean
 
 UV  := uv
@@ -39,14 +39,14 @@ check: lint format-check typecheck ## Run all static analysis (no file modificat
 
 # ─── Tests ────────────────────────────────────────────────────────────────────
 
-test: ## Run unit tests (no infrastructure required)
+test: ## Run all tests (testcontainers spins up required infrastructure)
+	$(UV) run pytest $(TST) -v
+
+test-unit: ## Run unit tests only — fast, no Docker required
 	$(UV) run pytest $(TST) -m "not integration" -v
 
-test-integration: ## Run integration tests (requires Docker Compose stack)
-	$(UV) run pytest $(TST) -m "integration" -v
-
-test-cov: ## Run unit tests with HTML coverage report
-	$(UV) run pytest $(TST) -m "not integration" \
+test-cov: ## Run all tests with coverage report
+	$(UV) run pytest $(TST) \
 		--cov=$(SRC) --cov-report=term-missing --cov-report=html
 
 # ─── Infrastructure ───────────────────────────────────────────────────────────

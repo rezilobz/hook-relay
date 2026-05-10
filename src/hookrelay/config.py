@@ -22,6 +22,7 @@ class Settings(BaseSettings):
     # Security
     signature_header: str = "X-HookRelay-Signature"
     api_key_header: str = "X-API-Key"
+    api_key: str
 
     # Server
     host: str = "0.0.0.0"  # noqa: S104
