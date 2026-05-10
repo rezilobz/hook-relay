@@ -123,5 +123,4 @@ omit = ["src/hookrelay/migrations/*", "tests/*"]
 [tool.coverage.report]
 show_missing = true
 skip_covered = false
-# Temporarily set to 0 to avoid CI failures while we work on improving test coverage.
-fail_under = 0
+fail_under = 80

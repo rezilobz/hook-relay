@@ -7,6 +7,12 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict
 
 
+class EventCreate(BaseModel):
+    event_type: str
+    idempotency_key: str
+    payload: dict[str, Any]
+
+
 class EventResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
