@@ -16,7 +16,8 @@ VALID_BODY = {
 
 
 async def _create(client: AsyncClient, body: dict[str, object] | None = None) -> dict[str, object]:
-    resp = await client.post("/endpoints", json=body or VALID_BODY, headers=AUTH)
+    payload = VALID_BODY if body is None else body
+    resp = await client.post("/endpoints", json=payload, headers=AUTH)
     assert resp.status_code == 201
     return resp.json()  # type: ignore[no-any-return]
 
