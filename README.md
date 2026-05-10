@@ -316,6 +316,7 @@ A Grafana dashboard definition is included at `infra/grafana/dashboard.json`.
 - [ ] Circuit breaker per endpoint (auto-disable consistently failing endpoints)
 - [ ] Bulk event ingestion endpoint
 - [ ] Endpoint health check and auto-recovery
+- [ ] Index PostgreSQL tables for common queries
 
 ### v0.3 — Developer experience
 - [ ] Web UI for delivery monitoring and DLQ management

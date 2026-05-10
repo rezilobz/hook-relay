@@ -3,7 +3,7 @@
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from hookrelay import metrics
@@ -52,6 +52,46 @@ async def get_event(event_id: uuid.UUID, db: DB) -> Event:
     event = await db.get(Event, event_id)
     if event is None:
         raise HTTPException(status_code=404, detail="Event not found")
+
+    row = (
+        await db.execute(
+            text("""
+                SELECT
+                    COUNT(CASE WHEN has_success                    THEN 1 END) AS succeeded,
+                    COUNT(CASE WHEN in_dlq AND NOT has_success     THEN 1 END) AS exhausted,
+                    COUNT(CASE WHEN NOT has_success AND NOT in_dlq THEN 1 END) AS retrying
+                FROM (
+                    SELECT
+                        endpoint_id,
+                        coalesce(bool_or(status = 'success'), false) AS has_success,
+                        bool_or(from_dlq)                            AS in_dlq
+                    FROM (
+                        SELECT endpoint_id, status, false AS from_dlq
+                          FROM delivery_attempts WHERE event_id = :eid
+                        UNION ALL
+                        SELECT endpoint_id, NULL, true
+                          FROM dlq_entries WHERE event_id = :eid
+                    ) src
+                    GROUP BY endpoint_id
+                ) states
+            """),
+            {"eid": event_id},
+        )
+    ).one()
+
+    succeeded, exhausted, retrying = int(row.succeeded), int(row.exhausted), int(row.retrying)
+
+    if succeeded + exhausted + retrying == 0:
+        event.status = "pending"
+    elif retrying > 0:
+        event.status = "pending" if succeeded == 0 else "partially_delivered"
+    elif succeeded > 0 and exhausted == 0:
+        event.status = "delivered"
+    elif exhausted > 0 and succeeded == 0:
+        event.status = "dlq"
+    else:
+        event.status = "partially_delivered"
+
     return event
 
 
