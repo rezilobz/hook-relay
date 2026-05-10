@@ -13,8 +13,9 @@ from hookrelay.main import create_app
 
 
 class FakeProducer:
-    def __init__(self) -> None:
+    def __init__(self, *, should_fail: bool = False) -> None:
         self.published: list[tuple[str, dict]] = []
+        self.should_fail = should_fail
 
     async def start(self) -> None:
         pass
@@ -23,6 +24,8 @@ class FakeProducer:
         pass
 
     async def publish(self, topic: str, message: dict) -> None:
+        if self.should_fail:
+            raise RuntimeError("Kafka unavailable")
         self.published.append((topic, message))
 
 
@@ -57,9 +60,16 @@ def fake_producer() -> FakeProducer:
 
 
 @pytest.fixture()
-async def client(
-    async_engine: AsyncEngine, fake_producer: FakeProducer
-) -> AsyncGenerator[AsyncClient, None]:
+def failing_producer() -> FakeProducer:
+    return FakeProducer(should_fail=True)
+
+
+def _make_client(
+    async_engine: AsyncEngine,
+    producer: FakeProducer,
+    *,
+    raise_server_exceptions: bool = True,
+) -> AsyncClient:
     app = create_app()
 
     async def override_get_db() -> AsyncGenerator[AsyncSession, None]:
@@ -67,11 +77,32 @@ async def client(
             yield session
 
     async def override_get_producer() -> FakeProducer:
-        return fake_producer
+        return producer
 
     app.dependency_overrides[get_db] = override_get_db
     app.dependency_overrides[get_producer_dep] = override_get_producer
 
+    return AsyncClient(
+        transport=ASGITransport(app, raise_app_exceptions=raise_server_exceptions),  # type: ignore[arg-type]
+        base_url="http://test",
+    )
+
+
+@pytest.fixture()
+async def client(
+    async_engine: AsyncEngine, fake_producer: FakeProducer
+) -> AsyncGenerator[AsyncClient, None]:
     with patch("hookrelay.main.HookRelayProducer", new=lambda: fake_producer):
-        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+        async with _make_client(async_engine, fake_producer) as ac:
+            yield ac
+
+
+@pytest.fixture()
+async def failing_client(
+    async_engine: AsyncEngine, failing_producer: FakeProducer
+) -> AsyncGenerator[AsyncClient, None]:
+    with patch("hookrelay.main.HookRelayProducer", new=lambda: failing_producer):
+        async with _make_client(
+            async_engine, failing_producer, raise_server_exceptions=False
+        ) as ac:
             yield ac

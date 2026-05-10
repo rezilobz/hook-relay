@@ -33,7 +33,6 @@ async def ingest_event(body: EventCreate, db: DB, producer: Producer) -> Event:
         .returning(Event.id)
     )
     inserted_id = result.scalar_one_or_none()
-    await db.commit()
 
     event_result = await db.execute(
         select(Event).where(Event.idempotency_key == body.idempotency_key)
@@ -41,9 +40,13 @@ async def ingest_event(body: EventCreate, db: DB, producer: Producer) -> Event:
     event = event_result.scalar_one()
 
     if inserted_id is not None:
+        # Publish before commit: if Kafka fails, the exception propagates and
+        # the transaction rolls back, so the event is never persisted without a
+        # worker signal.
         await producer.publish(settings.kafka_topic_pending, {"event_id": str(event.id)})
         metrics.events_ingested_total.inc()
 
+    await db.commit()
     return event
 
 

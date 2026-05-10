@@ -4,10 +4,11 @@ import uuid
 
 import pytest
 from httpx import AsyncClient
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from hookrelay.config import settings
-from hookrelay.db.models import DeliveryAttempt, DLQEntry, Endpoint
+from hookrelay.db.models import DeliveryAttempt, DLQEntry, Endpoint, Event
 from tests.integration.conftest import FakeProducer
 
 AUTH = {settings.api_key_header: settings.api_key}
@@ -89,6 +90,49 @@ class TestIngestEvent:
             "/events", json=VALID_BODY, headers={settings.api_key_header: "wrong"}
         )
         assert resp.status_code == 401
+
+
+# ─── POST /events — Kafka failure (publish-before-commit contract) ────────────
+
+
+@pytest.mark.integration
+class TestIngestEventKafkaFailure:
+    """Verify that a Kafka publish failure leaves no persisted event (atomic rollback).
+
+    The publish-before-commit ordering means: if producer.publish() raises,
+    the exception propagates before db.commit() is called, the SQLAlchemy session
+    is closed without committing, and the INSERT is rolled back. The caller gets a
+    500 and can safely retry with the same idempotency_key.
+    """
+
+    async def test_kafka_failure_returns_500(self, failing_client: AsyncClient) -> None:
+        resp = await failing_client.post("/events", json=VALID_BODY, headers=AUTH)
+        assert resp.status_code == 500
+
+    async def test_kafka_failure_does_not_persist_event(
+        self, failing_client: AsyncClient, db: AsyncSession
+    ) -> None:
+        await failing_client.post("/events", json=VALID_BODY, headers=AUTH)
+
+        result = await db.execute(
+            select(Event).where(Event.idempotency_key == VALID_BODY["idempotency_key"])
+        )
+        assert result.scalar_one_or_none() is None
+
+    async def test_retry_after_kafka_failure_succeeds(
+        self,
+        failing_client: AsyncClient,
+        client: AsyncClient,
+        fake_producer: FakeProducer,
+    ) -> None:
+        # First attempt: Kafka down, event rolled back.
+        await failing_client.post("/events", json=VALID_BODY, headers=AUTH)
+
+        # Second attempt (Kafka up): must be treated as a fresh insert, not a duplicate.
+        resp = await client.post("/events", json=VALID_BODY, headers=AUTH)
+
+        assert resp.status_code == 201
+        assert len(fake_producer.published) == 1
 
 
 # ─── GET /events/{id} ─────────────────────────────────────────────────────────
