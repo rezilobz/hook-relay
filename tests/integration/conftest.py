@@ -1,9 +1,16 @@
 from collections.abc import AsyncGenerator, Generator
+from typing import Any
 from unittest.mock import patch
+from uuid import UUID
 
 import pytest
 from httpx import ASGITransport, AsyncClient
-from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engine
+from sqlalchemy.ext.asyncio import (
+    AsyncEngine,
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
 from testcontainers.postgres import PostgresContainer
 
 from hookrelay.api.dependencies import get_producer as get_producer_dep
@@ -54,6 +61,29 @@ async def db(async_engine: AsyncEngine) -> AsyncGenerator[AsyncSession, None]:
         yield session
 
 
+class FakeScheduler:
+    """Test double for RetryScheduler. Records calls for assertion."""
+
+    def __init__(self) -> None:
+        self.scheduled: list[tuple[UUID, UUID, int, dict[str, Any]]] = []
+        self.cancelled: list[tuple[UUID, UUID]] = []
+
+    async def schedule(
+        self,
+        event_id: UUID,
+        endpoint_id: UUID,
+        attempt_number: int,
+        message: dict[str, Any],
+    ) -> None:
+        self.scheduled.append((event_id, endpoint_id, attempt_number, message))
+
+    async def poll_due(self, now: float | None = None) -> list[dict[str, Any]]:
+        return []
+
+    async def cancel(self, event_id: UUID, endpoint_id: UUID) -> None:
+        self.cancelled.append((event_id, endpoint_id))
+
+
 @pytest.fixture()
 def fake_producer() -> FakeProducer:
     return FakeProducer()
@@ -62,6 +92,22 @@ def fake_producer() -> FakeProducer:
 @pytest.fixture()
 def failing_producer() -> FakeProducer:
     return FakeProducer(should_fail=True)
+
+
+@pytest.fixture()
+def fake_scheduler() -> FakeScheduler:
+    return FakeScheduler()
+
+
+@pytest.fixture()
+def worker_session_factory(async_engine: AsyncEngine):
+    """Patch AsyncSessionLocal in worker modules to use the test database engine."""
+    factory = async_sessionmaker(async_engine, expire_on_commit=False)
+    with (
+        patch("hookrelay.worker.delivery.AsyncSessionLocal", factory),
+        patch("hookrelay.worker.dlq.AsyncSessionLocal", factory),
+    ):
+        yield factory
 
 
 def _make_client(

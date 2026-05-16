@@ -45,7 +45,6 @@ HookRelay solves these problems with a Kafka-backed architecture purpose-built f
         │  POST /events │  │   FastAPI   │     │     Kafka Topics          │  │
         └──────────────►│  │  Ingestion  ├────►│                           │  │
                         │  │   API       │     │  hookrelay.events.pending │  │
-                        │  │             │     │  hookrelay.events.retry   │  │
                         │  └─────────────┘     │  hookrelay.events.dlq     │  │
                         │                      │                           │  │
                         │  ┌─────────────┐     └──────────┬────────────────┘  │
@@ -56,7 +55,7 @@ HookRelay solves these problems with a Kafka-backed architecture purpose-built f
                         │  │             │     │                          │   │
                         │  │  /endpoints │     │  ┌────────────────────┐  │   │
                         │  │  /events    │     │  │  Retry Scheduler   │  │   │
-                        │  │  /deliveries│     │  │  (exp. backoff)    │  │   │
+                        │  │  /deliveries│     │  │  (Redis ZSET)      │  │   │
                         │  │             │     │  └────────────────────┘  │   │
                         │  └──────┬──────┘     │                          │   │
                         │         │            │  ┌────────────────────┐  │   │
@@ -72,11 +71,11 @@ HookRelay solves these problems with a Kafka-backed architecture purpose-built f
                         │  │             │                ▼                   │
                         │  └─────────────┘     Customer Endpoint              │
                         │                                                     │
-                        │  ┌─────────────┐                                    │
-                        │  │  Prometheus │  /metrics                          │
-                        │  │  + Grafana  │◄── worker, Kafka consumer lag,     │
-                        │  │             │    delivery success/fail rates     │
-                        │  └─────────────┘                                    │
+                        │  ┌─────────────┐  ┌─────────────┐                   │
+                        │  │  Prometheus │  │    Redis    │  retry ZSET       │
+                        │  │  + Grafana  │  │    (AOF)    │  scheduler        │
+                        │  │             │  │             │                   │
+                        │  └─────────────┘  └─────────────┘                   │
                         └─────────────────────────────────────────────────────┘
 ```
 
@@ -86,9 +85,10 @@ HookRelay solves these problems with a Kafka-backed architecture purpose-built f
 |---|---|
 | **Ingestion API** | Accepts incoming events from your application, validates payload, publishes to Kafka `events.pending` topic. Responds immediately — no synchronous delivery. |
 | **Control Plane API** | CRUD for endpoint registration (URL, secret, event filters, enabled/disabled). Delivery history queries. Manual retry triggers. |
-| **Kafka** | Durable event backbone. Three topics: `pending` for fresh events, `retry` for scheduled re-attempts, `dlq` for exhausted deliveries. |
+| **Kafka** | Durable event backbone. Two topics: `pending` for fresh events, `dlq` for exhausted deliveries. Retry scheduling is handled by Redis, not a dedicated Kafka topic. |
 | **Delivery Worker Pool** | Consumes from Kafka, attempts HTTPS delivery to registered endpoints, writes attempt result to PostgreSQL, routes to retry or DLQ on failure. |
-| **Retry Scheduler** | Computes next attempt time using exponential backoff with jitter, publishes to `retry` topic with appropriate delay. |
+| **Retry Scheduler** | Coroutine that polls a Redis ZSET for due retries and republishes to `hookrelay.events.pending`. Computes next attempt time using exponential backoff with jitter. |
+| **Redis** | Stores scheduled retry entries as a sorted set (score = `retry_after` Unix timestamp). AOF persistence must be enabled — a Redis restart without AOF would silently discard all pending retries. |
 | **PostgreSQL** | Source of truth for endpoint configuration, event metadata, and full delivery attempt history. |
 | **Prometheus + Grafana** | Tracks delivery success rate, retry depth distribution, Kafka consumer group lag, DLQ entry rate, and per-endpoint failure rates. |
 
@@ -97,8 +97,8 @@ HookRelay solves these problems with a Kafka-backed architecture purpose-built f
 ## Core Features
 
 - **At-least-once delivery** — Events are never dropped. Kafka consumer offsets are committed only after a successful delivery attempt write to PostgreSQL.
-- **Exponential backoff with jitter** — Retries follow `min(cap, base * 2^attempt) + random jitter` to avoid thundering herd against recovering endpoints.
-- **Dead letter queue** — Events exhausting all retry attempts move to the DLQ. They are inspectable, replayable, and never silently discarded.
+- **Exponential backoff with jitter** — Retries follow `min(cap, base * 2^attempt) + random jitter`. Starts at seconds, transitions to minutes, plateaus at 4-hour intervals — ~8.5 hours total window across 15 attempts.
+- **Dead letter queue** — Events exhausting all retry attempts move to the DLQ. They are inspectable, replayable, and never silently discarded. Permanent client errors (4xx, except 429) bypass the retry queue entirely and go straight to the DLQ on first failure.
 - **Idempotency keys** — Each event carries a unique ID. Workers check for prior successful delivery before attempting, making duplicate processing safe.
 - **HMAC-SHA256 signatures** — Every delivery includes a signature header computed from the endpoint's secret. Consumers can verify authenticity.
 - **Per-endpoint filtering** — Endpoints subscribe to specific event types. Unsubscribed events are never routed to them.
@@ -198,7 +198,7 @@ The primary contenders were Kafka, Redis Streams, and a PostgreSQL-backed queue 
 
 A PostgreSQL queue was rejected because polling introduces latency, and high-throughput event ingestion against a transactional database creates write pressure that conflicts with the read patterns of the delivery history queries. They're different workloads that deserve different storage.
 
-Redis Streams was a serious candidate. It's operationally simpler than Kafka, supports consumer groups, and has sub-millisecond latency. For a deployment at moderate scale (< ~5,000 events/second), Redis Streams is arguably the better choice. The reason Kafka was chosen here is deliberate: the multi-topic routing pattern (pending → retry → dlq) maps cleanly to Kafka's topic semantics, and Kafka's durable log makes it possible to replay the entire event history if a worker bug causes incorrect delivery processing — something Redis cannot do after messages are consumed.
+Redis Streams was a serious candidate. It's operationally simpler than Kafka, supports consumer groups, and has sub-millisecond latency. For a deployment at moderate scale (< ~5,000 events/second), Redis Streams is arguably the better choice. The reason Kafka was chosen here is deliberate: even with Redis handling retry scheduling, Kafka's durable log makes it possible to replay the entire event history if a worker bug causes incorrect delivery processing — something Redis Streams cannot do after messages are consumed.
 
 The honest answer is: if you're self-hosting HookRelay for a team of 10, Redis Streams is probably the right call. Kafka is chosen here to handle the scale tier where HookRelay is actually worth deploying over a managed alternative.
 
@@ -206,7 +206,7 @@ The honest answer is: if you're self-hosting HookRelay for a team of 10, Redis S
 
 Fixed retry intervals create synchronized retry storms. If 500 endpoints fail simultaneously (e.g. during a brief network partition), fixed intervals mean 500 workers retry at exactly the same moments. Jitter distributes those retries across the backoff window, smoothing load on both HookRelay's worker pool and the customer's recovering endpoint.
 
-The formula used is `min(cap, base * 2^n) + uniform_random(0, base)` where `base = 1s` and `cap = 30 minutes`. This gives retry intervals of approximately 1s, 2s, 4s, 8s, 16s, 32s, 64s... up to 30 minutes, with randomisation at each step.
+The formula used is `min(cap, base * 2^n) + uniform_random(0, base)` where `base = 1s` and `cap = 4 hours`. This gives retry intervals that start fast (2s, 4s, 8s, 16s…), transition through minutes (~1min, ~2min, ~4min, ~8min, ~17min, ~34min), and eventually plateau at 4-hour intervals. With `MAX_RETRY_ATTEMPTS = 15`, the total retry window is approximately 8.5 hours before a delivery is moved to the DLQ.
 
 ### Why commit Kafka offsets after PostgreSQL write, not after delivery?
 
@@ -244,9 +244,13 @@ The HMAC-SHA256 signature sent in `X-HookRelay-Signature` is computed as `HMAC(p
 
 The `Event` table carries a `status` column (`pending` / `delivered` / `partially_delivered` / `dlq`) for fast list queries. Without it, `GET /events` would require joining against `DeliveryAttempt` and aggregating per event — expensive at scale. However, a stored field can drift out of sync if a worker crashes mid-update. The resolution: the stored `status` is a read cache updated asynchronously by workers, but the source of truth is always the `DeliveryAttempt` records. `GET /events/{id}` (single event detail) derives status fresh from attempts. `GET /events` (list) uses the stored field. Inconsistencies are transient and self-correcting as workers complete.
 
-### Why not Redis in v0.1?
+### Why Redis for retry scheduling, not a dedicated Kafka retry topic?
 
-Redis is a natural fit for several features in this system: caching API keys (v0.4 multi-tenancy), per-endpoint rate limiting (v0.2), and circuit breaker state (v0.2). It is deliberately excluded from v0.1 because none of those features are being built yet, and adding Redis now means adding an operational dependency — another service to run, monitor, and back up — with no current payoff. All v0.1 use cases (idempotency checks, auth) are served adequately by PostgreSQL with proper indexes at the target scale. The isolation is intentional: idempotency logic lives in `worker/delivery.py` and auth in `api/dependencies.py`, so a Redis cache layer can be inserted in front of either without structural changes when the time comes.
+The original design used a `hookrelay.events.retry` Kafka topic with a delay mechanism for scheduled re-attempts. Redis was introduced instead because it provides a first-class primitive for this pattern: a sorted set (ZSET) where the score is the `retry_after` Unix timestamp. A scheduler coroutine polls for due retries with an atomic Lua `ZPOPMIN`-and-republish operation, then re-publishes to `hookrelay.events.pending`. This is strictly simpler than implementing delayed delivery semantics on top of Kafka, which has no native delay support.
+
+Redis also unlocks per-endpoint rate limiting and circuit breaker state in v0.2 without adding a new operational dependency at that point — the service is already running.
+
+**Durability caveat:** Redis is in-memory by default. AOF (append-only file) persistence must be enabled (`--appendonly yes`) so that a Redis restart does not silently discard all scheduled retries. In Docker Compose this is passed as a command argument to the Redis service. In production, treat Redis persistence configuration as a reliability requirement, not an optional tuning parameter.
 
 ### Why publish to Kafka before committing, not after?
 
@@ -266,6 +270,14 @@ HookRelay uses a single driver (`asyncpg`) for both. Alembic's async migration s
 
 The ingestion API and the delivery workers have different scaling profiles: you might run two API replicas behind a load balancer while running ten worker instances to increase delivery throughput. If they shared a process, they could only scale together. Running them as separate OS processes — the API via `uvicorn`, the workers via a dedicated `hookrelay-worker` entry point — also means a worker crash or Kafka consumer rebalance does not affect API availability, and vice versa.
 
+### Why do 4xx errors skip retries and go straight to the DLQ?
+
+Retry backoff is designed to handle *transient* failures — a momentarily overloaded server, a brief network interruption, a deploying service. A 4xx response is not transient: it indicates a permanent problem with the *request itself* — a misconfigured URL (404), a disallowed method (405), an authentication failure (401/403). Retrying the exact same request against the same endpoint will produce the exact same error every time, burning 9 retry slots and up to 8 hours of wall time with no chance of recovery.
+
+The one exception is **429 Too Many Requests**, which is explicitly transient — the server is functioning correctly and asking you to slow down. HookRelay treats 429 as a normal retryable failure.
+
+All other 4xx responses go immediately to the DLQ on first failure, where they are visible, inspectable, and replayable once the endpoint configuration is corrected.
+
 ### Why random Kafka partitioning (no ordering guarantee per endpoint)?
 
 Partitioning Kafka messages by `endpoint_id` would ensure all events for a given endpoint land in the same partition and are processed sequentially — guaranteeing delivery order. The tradeoff is head-of-line blocking: if one endpoint is slow or down, its entire partition stalls while other endpoints wait. Random (round-robin) partitioning maximises worker parallelism at the cost of ordering guarantees. For most webhook use cases, strict delivery ordering is not a requirement — consumers should be idempotent regardless. Ordered delivery per endpoint is a candidate feature for a future version, implementable by adding a partition-by-`endpoint_id` mode alongside a sequential delivery option in the worker.
@@ -281,7 +293,7 @@ HookRelay is configured via environment variables. See `.env.example` for all op
 | `KAFKA_BOOTSTRAP_SERVERS` | `localhost:9092` | Kafka broker addresses |
 | `DATABASE_URL` | — | PostgreSQL connection string |
 | `WORKER_CONCURRENCY` | `10` | Delivery worker thread count |
-| `MAX_RETRY_ATTEMPTS` | `9` | Attempts before DLQ (covers ~8h window) |
+| `MAX_RETRY_ATTEMPTS` | `15` | Attempts before DLQ (~8.5h total window: 2s → 4s → … → 4h) |
 | `DELIVERY_TIMEOUT_SECONDS` | `10` | Per-attempt HTTP timeout |
 | `SIGNATURE_HEADER` | `X-HookRelay-Signature` | Header name for HMAC payload signature |
 | `API_KEY_HEADER` | `X-API-Key` | Header name for ingestion API authentication |
@@ -308,14 +320,14 @@ A Grafana dashboard definition is included at `infra/grafana/dashboard.json`.
 ## Roadmap
 
 ### v0.1 — Core delivery engine *(current focus)*
-- [ ] Event ingestion API
-- [ ] Endpoint registration and management
-- [ ] Kafka-backed delivery worker
-- [ ] Exponential backoff retry logic
-- [ ] Dead letter queue
-- [ ] Delivery attempt history
-- [ ] HMAC-SHA256 payload signing
-- [ ] Docker Compose local stack
+- [x] Event ingestion API
+- [x] Endpoint registration and management
+- [x] Kafka-backed delivery worker
+- [x] Exponential backoff retry logic
+- [x] Dead letter queue
+- [x] Delivery attempt history
+- [x] HMAC-SHA256 payload signing
+- [x] Docker Compose local stack
 - [ ] Prometheus metrics
 
 ### v0.2 — Operational hardening
@@ -335,6 +347,7 @@ A Grafana dashboard definition is included at `infra/grafana/dashboard.json`.
 ### v0.4 — Scale and deployment
 - [ ] Kubernetes Helm chart
 - [ ] Horizontal worker scaling documentation
+- [ ] Standalone retry scheduler process (`hookrelay-scheduler`) — currently the retry scheduler runs as a coroutine inside each worker replica, which is correct (the atomic Lua pop prevents duplicate publishes) but results in redundant Redis polling proportional to replica count. At high replica counts, extract the scheduler into its own single-replica deployment with a separate entry point; the interface already supports this (`run_scheduler` is a standalone coroutine)
 - [ ] Multi-tenancy support (isolated endpoint namespaces per API key)
 - [ ] Redis-backed alternative transport layer for lightweight deployments
 

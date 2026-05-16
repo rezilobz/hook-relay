@@ -16,13 +16,16 @@ class Settings(BaseSettings):
 
     # Worker
     worker_concurrency: int = 10
-    max_retry_attempts: int = 9
+    max_retry_attempts: int = 15
     delivery_timeout_seconds: int = 10
 
     # Security
     signature_header: str = "X-HookRelay-Signature"
     api_key_header: str = "X-API-Key"
     api_key: str
+
+    # Redis
+    redis_url: str = "redis://localhost:6379/0"
 
     # Server
     host: str = "0.0.0.0"  # noqa: S104
