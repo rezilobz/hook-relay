@@ -299,21 +299,21 @@ async def run_delivery_loop(
                     except Exception:
                         log.exception("delivery.commit_error", tp=tp, offset=commit_at)
 
-    # Strong references prevent tasks from being GC'd before completion.
-    _tasks: set[asyncio.Task[None]] = set()
-
     async with httpx.AsyncClient() as http_client:
         log.info("delivery_loop.started", concurrency=settings.worker_concurrency)
-        while True:
-            if _fatal_exc is not None:
-                raise _fatal_exc
-            batch = await consumer.getmany(
-                timeout_ms=500, max_records=settings.worker_concurrency * 4
-            )
-            for tp_obj, records in batch.items():
-                tp_key = (tp_obj.topic, tp_obj.partition)
-                for record in records:
-                    watermarks[tp_key].start(record.offset)
-                    task = asyncio.create_task(_process_and_commit(record))
-                    _tasks.add(task)
-                    task.add_done_callback(_tasks.discard)
+        # TaskGroup owns all per-record tasks. When the loop body raises (fatal
+        # infrastructure error or external cancellation), the group cancels every
+        # in-flight task and awaits them before __aexit__ returns — so the HTTP
+        # client stays open until all tasks have wound down cleanly.
+        async with asyncio.TaskGroup() as tg:
+            while True:
+                if _fatal_exc is not None:
+                    raise _fatal_exc
+                batch = await consumer.getmany(
+                    timeout_ms=500, max_records=settings.worker_concurrency * 4
+                )
+                for tp_obj, records in batch.items():
+                    tp_key = (tp_obj.topic, tp_obj.partition)
+                    for record in records:
+                        watermarks[tp_key].start(record.offset)
+                        tg.create_task(_process_and_commit(record))
