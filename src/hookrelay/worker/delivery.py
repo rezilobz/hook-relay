@@ -205,9 +205,10 @@ async def _process_record(
     try:
         event_id = UUID(message["event_id"])
         attempt_number = int(message.get("attempt_number", 0))
+        endpoint_id_raw: str | None = message.get("endpoint_id")
+        endpoint_id: UUID | None = UUID(endpoint_id_raw) if endpoint_id_raw else None
     except (KeyError, ValueError) as exc:
         raise PoisonPillError(f"malformed message: {exc}") from exc
-    endpoint_id_raw: str | None = message.get("endpoint_id")
 
     async with AsyncSessionLocal() as session:
         event = await session.get(Event, event_id)
@@ -216,9 +217,9 @@ async def _process_record(
             log.warning("delivery.orphan_event", event_id=str(event_id))
             return
 
-        if endpoint_id_raw:
+        if endpoint_id is not None:
             # Targeted retry — deliver to one specific endpoint.
-            endpoint = await session.get(Endpoint, UUID(endpoint_id_raw))
+            endpoint = await session.get(Endpoint, endpoint_id)
             targets: list[Endpoint] = [endpoint] if (endpoint and endpoint.enabled) else []
         else:
             # Fresh fanout — deliver to all matching enabled endpoints.

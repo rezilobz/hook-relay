@@ -34,12 +34,13 @@ async def move_to_dlq(
        DLQEntry in Postgres is the source of truth.
     """
     async with AsyncSessionLocal() as session:
-        await session.execute(
+        result = await session.execute(
             pg_insert(DLQEntry)
             .values(event_id=event_id, endpoint_id=endpoint_id, reason=reason)
             .on_conflict_do_nothing(constraint="uq_dlq_entry")
         )
         await session.commit()
+    inserted = result.rowcount == 1  # type: ignore[attr-defined]
 
     try:
         await scheduler.cancel(event_id, endpoint_id)
@@ -54,6 +55,7 @@ async def move_to_dlq(
         settings.kafka_topic_dlq,
         {"event_id": str(event_id), "endpoint_id": str(endpoint_id)},
     )
-    metrics.dlq_entries_total.inc()
+    if inserted:
+        metrics.dlq_entries_total.inc()
 
     log.info("dlq.moved", event_id=str(event_id), endpoint_id=str(endpoint_id), reason=reason)

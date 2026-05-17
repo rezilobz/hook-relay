@@ -47,9 +47,14 @@ class RetryScheduler(Protocol):
         ...
 
     async def poll_due(self, now: float | None = None) -> list[dict[str, Any]]:
-        """Atomically fetch and remove all retry entries whose retry_after <= now.
+        """Fetch (without removing) retry entries whose retry_after <= now.
 
         Returns a list of message dicts ready to republish to Kafka.
+        The caller must call cancel() after each successful publish so the
+        entry is removed from Redis. A crash before cancel() leaves the entry
+        in Redis and it will be re-fetched on the next poll, producing a
+        duplicate Kafka message that the delivery worker's idempotency check
+        will suppress.
         """
         ...
 
@@ -64,21 +69,22 @@ class RetryScheduler(Protocol):
 # the next scheduler tick.
 _POLL_BATCH = 100
 
-# Atomically fetch-and-remove up to _POLL_BATCH ZSET entries due by `now`,
-# pulling their payloads from the data hash. Members present in the ZSET but
-# missing from the hash (should not happen; defensive) are silently dropped.
+# Fetch up to _POLL_BATCH ZSET entries due by `now`, pulling their payloads
+# from the data hash. Does NOT remove entries — the caller must call cancel()
+# after a successful Kafka publish so that a crash between fetch and publish
+# leaves entries in Redis and they are retried on the next poll (at-least-once).
+# Members present in the ZSET but missing from the hash (should not happen;
+# defensive) are silently skipped.
 _POLL_SCRIPT = """
 local members = redis.call('ZRANGEBYSCORE', KEYS[1], '-inf', ARGV[1], 'LIMIT', 0, ARGV[2])
 if #members == 0 then return {} end
 local results = {}
 for _, member in ipairs(members) do
     local data = redis.call('HGET', KEYS[2], member)
-    redis.call('HDEL', KEYS[2], member)
     if data then
         table.insert(results, data)
     end
 end
-redis.call('ZREM', KEYS[1], unpack(members))
 return results
 """
 
