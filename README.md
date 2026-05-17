@@ -291,8 +291,10 @@ HookRelay is configured via environment variables. See `.env.example` for all op
 | Variable | Default | Description |
 |---|---|---|
 | `KAFKA_BOOTSTRAP_SERVERS` | `localhost:9092` | Kafka broker addresses |
-| `DATABASE_URL` | — | PostgreSQL connection string |
-| `WORKER_CONCURRENCY` | `10` | Delivery worker thread count |
+| `DATABASE_URL` | `postgresql+asyncpg://hookrelay:hookrelay@localhost:5432/hookrelay` | PostgreSQL connection string (asyncpg driver required) |
+| `REDIS_URL` | `redis://localhost:6379/0` | Redis connection string. AOF persistence must be enabled — a restart without AOF silently discards all scheduled retries |
+| `API_KEY` | *(required)* | Secret used to authenticate requests to the ingestion and control plane APIs |
+| `WORKER_CONCURRENCY` | `10` | Maximum concurrent in-flight HTTP delivery tasks |
 | `MAX_RETRY_ATTEMPTS` | `15` | Attempts before DLQ (~8.5h total window: 2s → 4s → … → 4h) |
 | `DELIVERY_TIMEOUT_SECONDS` | `10` | Per-attempt HTTP timeout |
 | `SIGNATURE_HEADER` | `X-HookRelay-Signature` | Header name for HMAC payload signature |
