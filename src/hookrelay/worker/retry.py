@@ -58,11 +58,17 @@ class RetryScheduler(Protocol):
         ...
 
 
-# Atomically fetch-and-remove all ZSET entries due by `now`, pulling their
-# payloads from the data hash. Members present in the ZSET but missing from
-# the hash (should not happen; defensive) are silently dropped.
+# Batch size for each poll_due call. Keeps each Lua script execution bounded:
+# Lua 5.1's unpack() overflows at ~8000 args, and large batches block Redis
+# (single-threaded) for other clients. Remaining due entries are picked up on
+# the next scheduler tick.
+_POLL_BATCH = 100
+
+# Atomically fetch-and-remove up to _POLL_BATCH ZSET entries due by `now`,
+# pulling their payloads from the data hash. Members present in the ZSET but
+# missing from the hash (should not happen; defensive) are silently dropped.
 _POLL_SCRIPT = """
-local members = redis.call('ZRANGEBYSCORE', KEYS[1], '-inf', ARGV[1])
+local members = redis.call('ZRANGEBYSCORE', KEYS[1], '-inf', ARGV[1], 'LIMIT', 0, ARGV[2])
 if #members == 0 then return {} end
 local results = {}
 for _, member in ipairs(members) do
@@ -131,7 +137,7 @@ class RedisRetryScheduler:
         timestamp = now if now is not None else time.time()
         raw_entries: list[str] = await self._poll_script(
             keys=[_ZSET_KEY, _DATA_KEY],
-            args=[timestamp],
+            args=[timestamp, _POLL_BATCH],
         )
         return [json.loads(entry) for entry in raw_entries]
 
