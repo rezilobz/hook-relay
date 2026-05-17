@@ -484,3 +484,18 @@ class TestMoveToDeadLetterQueue:
         topic, msg = fake_producer.published[0]
         assert topic == settings.kafka_topic_dlq
         assert msg == {"event_id": str(event.id), "endpoint_id": str(endpoint.id)}
+
+    async def test_idempotent_second_call_does_not_create_duplicate_entry(
+        self,
+        worker_session_factory,
+        fake_producer: FakeProducer,
+        fake_scheduler: FakeScheduler,
+    ) -> None:
+        event = await _seed_event(worker_session_factory)
+        endpoint = await _seed_endpoint(worker_session_factory)
+
+        await move_to_dlq(fake_producer, fake_scheduler, event.id, endpoint.id, "exhausted")
+        await move_to_dlq(fake_producer, fake_scheduler, event.id, endpoint.id, "exhausted")
+
+        entries = await _get_dlq_entries(worker_session_factory, event.id)
+        assert len(entries) == 1

@@ -70,6 +70,7 @@ class DeliveryAttempt(Base):
 
 class DLQEntry(Base):
     __tablename__ = "dlq_entries"
+    __table_args__ = (UniqueConstraint("event_id", "endpoint_id", name="uq_dlq_entry"),)
 
     id: Mapped[uuid.UUID] = mapped_column(
         PG_UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()

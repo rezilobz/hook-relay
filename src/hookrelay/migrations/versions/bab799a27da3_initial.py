@@ -84,6 +84,7 @@ def upgrade() -> None:
             ["events.id"],
         ),
         sa.PrimaryKeyConstraint("id"),
+        sa.UniqueConstraint("event_id", "endpoint_id", name="uq_dlq_entry"),
     )
     # ### end Alembic commands ###
 
