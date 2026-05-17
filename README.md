@@ -272,7 +272,7 @@ The ingestion API and the delivery workers have different scaling profiles: you 
 
 ### Why do 4xx errors skip retries and go straight to the DLQ?
 
-Retry backoff is designed to handle *transient* failures — a momentarily overloaded server, a brief network interruption, a deploying service. A 4xx response is not transient: it indicates a permanent problem with the *request itself* — a misconfigured URL (404), a disallowed method (405), an authentication failure (401/403). Retrying the exact same request against the same endpoint will produce the exact same error every time, burning 9 retry slots and up to 8 hours of wall time with no chance of recovery.
+Retry backoff is designed to handle *transient* failures — a momentarily overloaded server, a brief network interruption, a deploying service. A 4xx response is not transient: it indicates a permanent problem with the *request itself* — a misconfigured URL (404), a disallowed method (405), an authentication failure (401/403). Retrying the exact same request against the same endpoint will produce the exact same error every time, burning 15 retry slots and up to 8.5 hours of wall time with no chance of recovery.
 
 The one exception is **429 Too Many Requests**, which is explicitly transient — the server is functioning correctly and asking you to slow down. HookRelay treats 429 as a normal retryable failure.
 
