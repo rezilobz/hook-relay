@@ -269,8 +269,7 @@ async def run_delivery_loop(
         tp = (record.topic, record.partition)
         advance = False
         try:
-            async with semaphore:
-                await _process_record(record.value, http_client, producer, scheduler)
+            await _process_record(record.value, http_client, producer, scheduler)
             advance = True
         except PoisonPillError:
             # Message is structurally broken and will always fail. Commit and move on;
@@ -289,6 +288,7 @@ async def run_delivery_loop(
             if _fatal_exc is None:
                 _fatal_exc = exc
         finally:
+            semaphore.release()
             if advance:
                 commit_at = watermarks[tp].done(record.offset)
                 if commit_at is not None:
@@ -315,5 +315,6 @@ async def run_delivery_loop(
                 for tp_obj, records in batch.items():
                     tp_key = (tp_obj.topic, tp_obj.partition)
                     for record in records:
+                        await semaphore.acquire()
                         watermarks[tp_key].start(record.offset)
                         tg.create_task(_process_and_commit(record))
