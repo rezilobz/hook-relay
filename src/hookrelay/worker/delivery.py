@@ -29,11 +29,6 @@ from hookrelay.worker.retry import RetryScheduler
 log = structlog.get_logger()
 
 
-# ---------------------------------------------------------------------------
-# Per-partition offset watermark
-# ---------------------------------------------------------------------------
-
-
 @dataclass
 class PartitionWatermark:
     """Tracks in-flight offsets for one Kafka partition.
@@ -61,18 +56,17 @@ class PartitionWatermark:
         return None
 
 
-# ---------------------------------------------------------------------------
-# Signing
-# ---------------------------------------------------------------------------
-
-
 def _hmac_signature(secret: str, payload_bytes: bytes) -> str:
     return hmac.new(secret.encode(), payload_bytes, hashlib.sha256).hexdigest()
 
 
-# ---------------------------------------------------------------------------
-# Core delivery logic
-# ---------------------------------------------------------------------------
+class PoisonPillError(Exception):
+    """Raised when a Kafka message is structurally invalid and will always fail.
+
+    Unlike infrastructure failures, retrying a poison pill message on worker
+    restart will produce the same error indefinitely. The correct response is
+    to log it and commit the offset so the partition can advance.
+    """
 
 
 async def _deliver_to_endpoint(
@@ -201,11 +195,6 @@ async def _deliver_to_endpoint(
         bound.debug("delivery.retry_scheduled", next_attempt=next_attempt)
 
 
-# ---------------------------------------------------------------------------
-# Record processing
-# ---------------------------------------------------------------------------
-
-
 async def _process_record(
     message: dict[str, Any],
     http_client: httpx.AsyncClient,
@@ -213,9 +202,12 @@ async def _process_record(
     scheduler: RetryScheduler,
 ) -> None:
     """Resolve event + target endpoints from a Kafka message, then deliver."""
-    event_id = UUID(message["event_id"])
+    try:
+        event_id = UUID(message["event_id"])
+        attempt_number = int(message.get("attempt_number", 0))
+    except (KeyError, ValueError) as exc:
+        raise PoisonPillError(f"malformed message: {exc}") from exc
     endpoint_id_raw: str | None = message.get("endpoint_id")
-    attempt_number = int(message.get("attempt_number", 0))
 
     async with AsyncSessionLocal() as session:
         event = await session.get(Event, event_id)
@@ -251,11 +243,6 @@ async def _process_record(
         )
 
 
-# ---------------------------------------------------------------------------
-# Main delivery loop
-# ---------------------------------------------------------------------------
-
-
 async def run_delivery_loop(
     consumer: HookRelayConsumer,
     producer: HookRelayProducer,
@@ -271,23 +258,46 @@ async def run_delivery_loop(
     semaphore = asyncio.Semaphore(settings.worker_concurrency)
     watermarks: defaultdict[tuple[str, int], PartitionWatermark] = defaultdict(PartitionWatermark)
 
+    # Infrastructure failures (DB down, Redis down, etc.) set this so the main
+    # loop can exit cleanly after the current getmany batch drains. The worker
+    # process then restarts and aiokafka replays from the last committed offset,
+    # preserving at-least-once delivery.
+    _fatal_exc: Exception | None = None
+
     async def _process_and_commit(record: ConsumerRecord) -> None:
+        nonlocal _fatal_exc
         tp = (record.topic, record.partition)
+        advance = False
         try:
             async with semaphore:
                 await _process_record(record.value, http_client, producer, scheduler)
-        except Exception:
+            advance = True
+        except PoisonPillError:
+            # Message is structurally broken and will always fail. Commit and move on;
+            # retrying on restart would loop forever on the same broken payload.
+            log.error(
+                "delivery.poison_pill",
+                offset=record.offset,
+                topic=record.topic,
+                partition=record.partition,
+            )
+            advance = True
+        except Exception as exc:
+            # Infrastructure failure — do not commit. Signal the main loop to
+            # exit so the process restarts and replays from the last committed offset.
             log.exception("delivery.unhandled_error", offset=record.offset, topic=record.topic)
+            if _fatal_exc is None:
+                _fatal_exc = exc
         finally:
-            # Advance watermark and commit if we've cleared a contiguous run of offsets.
-            commit_at = watermarks[tp].done(record.offset)
-            if commit_at is not None:
-                try:
-                    await consumer.commit_partition(
-                        TopicPartition(record.topic, record.partition), commit_at
-                    )
-                except Exception:
-                    log.exception("delivery.commit_error", tp=tp, offset=commit_at)
+            if advance:
+                commit_at = watermarks[tp].done(record.offset)
+                if commit_at is not None:
+                    try:
+                        await consumer.commit_partition(
+                            TopicPartition(record.topic, record.partition), commit_at
+                        )
+                    except Exception:
+                        log.exception("delivery.commit_error", tp=tp, offset=commit_at)
 
     # Strong references prevent tasks from being GC'd before completion.
     _tasks: set[asyncio.Task[None]] = set()
@@ -295,6 +305,8 @@ async def run_delivery_loop(
     async with httpx.AsyncClient() as http_client:
         log.info("delivery_loop.started", concurrency=settings.worker_concurrency)
         while True:
+            if _fatal_exc is not None:
+                raise _fatal_exc
             batch = await consumer.getmany(
                 timeout_ms=500, max_records=settings.worker_concurrency * 4
             )

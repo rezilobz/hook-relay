@@ -15,10 +15,6 @@ from hookrelay.worker.retry import RedisRetryScheduler
 from hookrelay.worker.scheduler import run_scheduler
 from tests.integration.conftest import FakeProducer
 
-# ---------------------------------------------------------------------------
-# Fixtures
-# ---------------------------------------------------------------------------
-
 
 @pytest.fixture()
 async def redis_client():
@@ -38,11 +34,6 @@ def _msg(event_id: uuid.UUID, endpoint_id: uuid.UUID, attempt: int = 1) -> dict[
         "endpoint_id": str(endpoint_id),
         "attempt_number": attempt,
     }
-
-
-# ---------------------------------------------------------------------------
-# RedisRetryScheduler
-# ---------------------------------------------------------------------------
 
 
 @pytest.mark.integration
@@ -128,11 +119,6 @@ class TestRedisRetryScheduler:
         # Same member key → only one entry; latest write wins.
         assert len(due) == 1
         assert due[0] == msg_v2
-
-
-# ---------------------------------------------------------------------------
-# run_scheduler
-# ---------------------------------------------------------------------------
 
 
 @pytest.mark.integration

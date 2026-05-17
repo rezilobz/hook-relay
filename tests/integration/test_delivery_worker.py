@@ -9,13 +9,9 @@ from sqlalchemy import select
 
 from hookrelay.config import settings
 from hookrelay.db.models import DeliveryAttempt, DLQEntry, Endpoint, Event
-from hookrelay.worker.delivery import _deliver_to_endpoint, _process_record
+from hookrelay.worker.delivery import PoisonPillError, _deliver_to_endpoint, _process_record
 from hookrelay.worker.dlq import move_to_dlq
 from tests.integration.conftest import FakeProducer, FakeScheduler
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
 
 
 def _http_client(*, status_code: int = 200) -> AsyncMock:
@@ -98,11 +94,6 @@ async def _get_dlq_entries(factory, event_id: uuid.UUID) -> list[DLQEntry]:
     async with factory() as session:
         result = await session.execute(select(DLQEntry).where(DLQEntry.event_id == event_id))
         return list(result.scalars().all())
-
-
-# ---------------------------------------------------------------------------
-# _deliver_to_endpoint
-# ---------------------------------------------------------------------------
 
 
 @pytest.mark.integration
@@ -312,11 +303,6 @@ class TestDeliverToEndpoint:
         http_client.post.assert_not_called()
 
 
-# ---------------------------------------------------------------------------
-# _process_record
-# ---------------------------------------------------------------------------
-
-
 @pytest.mark.integration
 class TestProcessRecord:
     async def test_fanout_delivers_to_all_matching_endpoints(
@@ -415,10 +401,42 @@ class TestProcessRecord:
 
         http_client.post.assert_not_called()
 
+    async def test_missing_event_id_raises_poison_pill(
+        self,
+        worker_session_factory,
+        fake_producer: FakeProducer,
+        fake_scheduler: FakeScheduler,
+    ) -> None:
+        with pytest.raises(PoisonPillError):
+            await _process_record({}, _http_client(status_code=200), fake_producer, fake_scheduler)
 
-# ---------------------------------------------------------------------------
-# move_to_dlq
-# ---------------------------------------------------------------------------
+    async def test_invalid_event_id_uuid_raises_poison_pill(
+        self,
+        worker_session_factory,
+        fake_producer: FakeProducer,
+        fake_scheduler: FakeScheduler,
+    ) -> None:
+        with pytest.raises(PoisonPillError):
+            await _process_record(
+                {"event_id": "not-a-uuid"},
+                _http_client(status_code=200),
+                fake_producer,
+                fake_scheduler,
+            )
+
+    async def test_invalid_attempt_number_raises_poison_pill(
+        self,
+        worker_session_factory,
+        fake_producer: FakeProducer,
+        fake_scheduler: FakeScheduler,
+    ) -> None:
+        with pytest.raises(PoisonPillError):
+            await _process_record(
+                {"event_id": str(uuid.uuid4()), "attempt_number": "bad"},
+                _http_client(status_code=200),
+                fake_producer,
+                fake_scheduler,
+            )
 
 
 @pytest.mark.integration
