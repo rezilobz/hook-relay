@@ -246,7 +246,7 @@ The `Event` table carries a `status` column (`pending` / `delivered` / `partiall
 
 ### Why Redis for retry scheduling, not a dedicated Kafka retry topic?
 
-The original design used a `hookrelay.events.retry` Kafka topic with a delay mechanism for scheduled re-attempts. Redis was introduced instead because it provides a first-class primitive for this pattern: a sorted set (ZSET) where the score is the `retry_after` Unix timestamp. A scheduler coroutine polls for due retries with an atomic Lua `ZPOPMIN`-and-republish operation, then re-publishes to `hookrelay.events.pending`. This is strictly simpler than implementing delayed delivery semantics on top of Kafka, which has no native delay support.
+The original design used a `hookrelay.events.retry` Kafka topic with a delay mechanism for scheduled re-attempts. Redis was introduced instead because it provides a first-class primitive for this pattern: a sorted set (ZSET) where the score is the `retry_after` Unix timestamp. A scheduler coroutine polls for due retries with an atomic Lua script (`ZRANGEBYSCORE` + `HGET`/`HDEL` + `ZREM`), then re-publishes to `hookrelay.events.pending`. The ZSET holds scores (retry timestamps); a companion hash holds the full Kafka message payload keyed by `{event_id}:{endpoint_id}`, allowing O(1) cancellation and arbitrary message data without encoding it into the ZSET member. This is strictly simpler than implementing delayed delivery semantics on top of Kafka, which has no native delay support.
 
 Redis also unlocks per-endpoint rate limiting and circuit breaker state in v0.2 without adding a new operational dependency at that point — the service is already running.
 
@@ -347,7 +347,7 @@ A Grafana dashboard definition is included at `infra/grafana/dashboard.json`.
 ### v0.4 — Scale and deployment
 - [ ] Kubernetes Helm chart
 - [ ] Horizontal worker scaling documentation
-- [ ] Standalone retry scheduler process (`hookrelay-scheduler`) — currently the retry scheduler runs as a coroutine inside each worker replica, which is correct (the atomic Lua pop prevents duplicate publishes) but results in redundant Redis polling proportional to replica count. At high replica counts, extract the scheduler into its own single-replica deployment with a separate entry point; the interface already supports this (`run_scheduler` is a standalone coroutine)
+- [ ] Standalone retry scheduler process (`hookrelay-scheduler`) — currently the retry scheduler runs as a coroutine inside each worker replica, which is correct (the atomic Lua poll-and-remove prevents duplicate publishes) but results in redundant Redis polling proportional to replica count. At high replica counts, extract the scheduler into its own single-replica deployment with a separate entry point; the interface already supports this (`run_scheduler` is a standalone coroutine)
 - [ ] Multi-tenancy support (isolated endpoint namespaces per API key)
 - [ ] Redis-backed alternative transport layer for lightweight deployments
 
