@@ -438,6 +438,27 @@ class TestProcessRecord:
                 fake_scheduler,
             )
 
+    async def test_unexpected_http_exception_writes_failure_attempt(
+        self,
+        worker_session_factory,
+        fake_producer: FakeProducer,
+        fake_scheduler: FakeScheduler,
+    ) -> None:
+        """A non-Timeout exception from the HTTP client is treated as a failure."""
+        event = await _seed_event(worker_session_factory)
+        endpoint = await _seed_endpoint(worker_session_factory)
+
+        error_client = AsyncMock(spec=httpx.AsyncClient)
+        error_client.post = AsyncMock(side_effect=ConnectionError("reset by peer"))
+
+        await _deliver_to_endpoint(event, endpoint, 0, error_client, fake_producer, fake_scheduler)
+
+        attempts = await _get_attempts(worker_session_factory, event.id)
+        assert len(attempts) == 1
+        assert attempts[0].status == "failure"
+        assert attempts[0].http_status is None
+        assert len(fake_scheduler.scheduled) == 1
+
 
 @pytest.mark.integration
 class TestMoveToDeadLetterQueue:
@@ -496,6 +517,40 @@ class TestMoveToDeadLetterQueue:
 
         await move_to_dlq(fake_producer, fake_scheduler, event.id, endpoint.id, "exhausted")
         await move_to_dlq(fake_producer, fake_scheduler, event.id, endpoint.id, "exhausted")
+
+        entries = await _get_dlq_entries(worker_session_factory, event.id)
+        assert len(entries) == 1
+
+    async def test_cancel_failure_is_tolerated(
+        self,
+        worker_session_factory,
+        fake_producer: FakeProducer,
+    ) -> None:
+        """Redis cancel failure must not prevent the DLQ entry from being written."""
+
+        class FailingScheduler:
+            async def cancel(self, *_args, **_kwargs) -> None:
+                raise RuntimeError("Redis down")
+
+        event = await _seed_event(worker_session_factory)
+        endpoint = await _seed_endpoint(worker_session_factory)
+
+        await move_to_dlq(fake_producer, FailingScheduler(), event.id, endpoint.id, "test")
+
+        entries = await _get_dlq_entries(worker_session_factory, event.id)
+        assert len(entries) == 1
+
+    async def test_kafka_publish_failure_is_tolerated(
+        self,
+        worker_session_factory,
+        fake_scheduler: FakeScheduler,
+        failing_producer: FakeProducer,
+    ) -> None:
+        """Kafka publish failure must not prevent the DLQ entry from being written."""
+        event = await _seed_event(worker_session_factory)
+        endpoint = await _seed_endpoint(worker_session_factory)
+
+        await move_to_dlq(failing_producer, fake_scheduler, event.id, endpoint.id, "test")
 
         entries = await _get_dlq_entries(worker_session_factory, event.id)
         assert len(entries) == 1

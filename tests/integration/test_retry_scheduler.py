@@ -124,6 +124,41 @@ class TestRedisRetryScheduler:
         assert len(due) == 1
         assert due[0] == msg_v2
 
+    async def test_corrupt_json_payload_is_skipped(
+        self, retry_scheduler: RedisRetryScheduler, redis_client
+    ) -> None:
+        """A non-JSON value in the hash must be skipped without crashing poll_due."""
+        from hookrelay.worker.retry import _DATA_KEY, _ZSET_KEY
+
+        # Inject a corrupt entry directly into Redis.
+        await redis_client.hset(_DATA_KEY, "bad:entry", "not-valid-json{{{")
+        await redis_client.zadd(_ZSET_KEY, {"bad:entry": time.time() - 1})
+
+        # A valid entry to confirm poll still returns good entries.
+        event_id, endpoint_id = uuid.uuid4(), uuid.uuid4()
+        msg = _msg(event_id, endpoint_id)
+        await retry_scheduler.schedule(event_id, endpoint_id, 0, msg)
+
+        due = await retry_scheduler.poll_due(now=time.time() + 10_000)
+
+        assert due == [msg]
+
+    async def test_orphaned_zset_member_is_cleaned_up(
+        self, retry_scheduler: RedisRetryScheduler, redis_client
+    ) -> None:
+        """A ZSET member with no hash entry must be removed (not re-scanned forever)."""
+        from hookrelay.worker.retry import _ZSET_KEY
+
+        # Add a member to the ZSET but not to the data hash.
+        await redis_client.zadd(_ZSET_KEY, {"orphan:member": time.time() - 1})
+
+        due = await retry_scheduler.poll_due(now=time.time() + 10_000)
+
+        assert due == []
+        # The orphan should be gone from the ZSET.
+        score = await redis_client.zscore(_ZSET_KEY, "orphan:member")
+        assert score is None
+
 
 @pytest.mark.integration
 class TestRunScheduler:
@@ -208,6 +243,36 @@ class TestRunScheduler:
                 await run_scheduler(producer, OneShotScheduler())
 
         assert cancelled == []
+
+    async def test_malformed_uuid_entry_is_skipped_not_raised(self) -> None:
+        """A message with an invalid UUID must be logged and skipped, not crash the scheduler."""
+        bad_msg = {"event_id": "not-a-uuid", "endpoint_id": "also-bad", "attempt_number": 1}
+        good_event_id, good_endpoint_id = uuid.uuid4(), uuid.uuid4()
+        good_msg = _msg(good_event_id, good_endpoint_id)
+        producer = FakeProducer()
+        iteration = 0
+
+        async def mock_sleep(_: float) -> None:
+            nonlocal iteration
+            iteration += 1
+            if iteration > 1:
+                raise asyncio.CancelledError
+
+        class MixedScheduler:
+            async def poll_due(self, now: float | None = None) -> list[dict[str, Any]]:
+                return [bad_msg, good_msg] if iteration == 1 else []
+
+            async def cancel(self, eid: uuid.UUID, epid: uuid.UUID) -> None:
+                pass
+
+        with patch("hookrelay.worker.scheduler.asyncio.sleep", side_effect=mock_sleep):
+            with contextlib.suppress(asyncio.CancelledError):
+                await run_scheduler(producer, MixedScheduler())
+
+        # Only the good message should have been published.
+        assert len(producer.published) == 1
+        _, published_msg = producer.published[0]
+        assert published_msg == good_msg
 
     async def test_empty_poll_publishes_nothing(self) -> None:
         producer = FakeProducer()
