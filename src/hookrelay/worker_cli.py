@@ -18,11 +18,10 @@ async def _run() -> None:
     producer = HookRelayProducer()
     scheduler = await RedisRetryScheduler.from_url()
 
-    await consumer.start()
-    await producer.start()
-    log.info("worker.started")
-
     try:
+        await consumer.start()
+        await producer.start()
+        log.info("worker.started")
         # TaskGroup semantics: if either task raises, the other is cancelled and
         # the exception propagates — worker process exits and is restarted cleanly.
         async with asyncio.TaskGroup() as tg:

@@ -32,15 +32,18 @@ async def run_scheduler(producer: HookRelayProducer, scheduler: RetryScheduler) 
         await asyncio.sleep(_POLL_INTERVAL_SECONDS)
         due = await scheduler.poll_due()
         for message in due:
+            try:
+                event_id = UUID(message["event_id"])
+                endpoint_id = UUID(message["endpoint_id"])
+            except (KeyError, ValueError):
+                log.error("scheduler.malformed_entry", message=str(message))
+                continue
             await producer.publish(settings.kafka_topic_pending, message)
-            await scheduler.cancel(
-                UUID(message["event_id"]),
-                UUID(message["endpoint_id"]),
-            )
+            await scheduler.cancel(event_id, endpoint_id)
             log.debug(
                 "scheduler.republished",
-                event_id=message.get("event_id"),
-                endpoint_id=message.get("endpoint_id"),
+                event_id=str(event_id),
+                endpoint_id=str(endpoint_id),
                 attempt=message.get("attempt_number"),
             )
         if due:

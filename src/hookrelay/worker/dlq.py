@@ -51,10 +51,17 @@ async def move_to_dlq(
             endpoint_id=str(endpoint_id),
         )
 
-    await producer.publish(
-        settings.kafka_topic_dlq,
-        {"event_id": str(event_id), "endpoint_id": str(endpoint_id)},
-    )
+    try:
+        await producer.publish(
+            settings.kafka_topic_dlq,
+            {"event_id": str(event_id), "endpoint_id": str(endpoint_id)},
+        )
+    except Exception:
+        log.warning(
+            "dlq.kafka_publish_failed",
+            event_id=str(event_id),
+            endpoint_id=str(endpoint_id),
+        )
     if inserted:
         metrics.dlq_entries_total.inc()
 

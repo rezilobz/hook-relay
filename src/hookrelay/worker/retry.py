@@ -64,9 +64,8 @@ class RetryScheduler(Protocol):
 
 
 # Batch size for each poll_due call. Keeps each Lua script execution bounded:
-# Lua 5.1's unpack() overflows at ~8000 args, and large batches block Redis
-# (single-threaded) for other clients. Remaining due entries are picked up on
-# the next scheduler tick.
+# large result sets block Redis (single-threaded) for other clients. Remaining
+# due entries are picked up on the next scheduler tick.
 _POLL_BATCH = 100
 
 # Fetch up to _POLL_BATCH ZSET entries due by `now`, pulling their payloads

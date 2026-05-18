@@ -252,6 +252,8 @@ Redis also unlocks per-endpoint rate limiting and circuit breaker state in v0.2 
 
 **Durability caveat:** Redis is in-memory by default. AOF (append-only file) persistence must be enabled (`--appendonly yes`) so that a Redis restart does not silently discard all scheduled retries. In Docker Compose this is passed as a command argument to the Redis service. In production, treat Redis persistence configuration as a reliability requirement, not an optional tuning parameter.
 
+**Scheduler delivery semantics:** The poll-and-republish flow is two-phase, not atomic. A Lua script fetches due entries from the ZSET (`ZRANGEBYSCORE` + `HGET`) without removing them. Each entry is published to `hookrelay.events.pending`, then removed from Redis via `cancel()` (`ZREM` + `HDEL`). A crash between publish and cancel leaves the entry in Redis; it will be re-fetched on the next poll and produce a duplicate Kafka message, which the delivery worker's idempotency check suppresses. This gives at-least-once delivery with no message loss.
+
 ### Why publish to Kafka before committing, not after?
 
 Publishing before commit means a Kafka failure rolls back the DB transaction — the event is never persisted without a corresponding worker signal. The client gets a 500 and can safely retry with the same idempotency key, which will be treated as a fresh insert.
@@ -349,7 +351,7 @@ A Grafana dashboard definition is included at `infra/grafana/dashboard.json`.
 ### v0.4 — Scale and deployment
 - [ ] Kubernetes Helm chart
 - [ ] Horizontal worker scaling documentation
-- [ ] Standalone retry scheduler process (`hookrelay-scheduler`) — currently the retry scheduler runs as a coroutine inside each worker replica, which is correct (the atomic Lua poll-and-remove prevents duplicate publishes) but results in redundant Redis polling proportional to replica count. At high replica counts, extract the scheduler into its own single-replica deployment with a separate entry point; the interface already supports this (`run_scheduler` is a standalone coroutine)
+- [ ] Standalone retry scheduler process (`hookrelay-scheduler`) — currently the retry scheduler runs as a coroutine inside each worker replica, which is correct (duplicate Kafka messages from concurrent replicas are suppressed by the delivery worker's idempotency check) but results in redundant Redis polling and extra Kafka traffic proportional to replica count. At high replica counts, extract the scheduler into its own single-replica deployment with a separate entry point; the interface already supports this (`run_scheduler` is a standalone coroutine)
 - [ ] Multi-tenancy support (isolated endpoint namespaces per API key)
 - [ ] Redis-backed alternative transport layer for lightweight deployments
 
