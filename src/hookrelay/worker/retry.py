@@ -7,6 +7,7 @@ from typing import Any, Protocol, runtime_checkable
 from uuid import UUID
 
 import redis.asyncio as aioredis
+import structlog
 
 from hookrelay.config import settings
 
@@ -17,6 +18,8 @@ _CAP: float = 4 * 3600  # 4 hours
 # Redis key names
 _ZSET_KEY = "hookrelay:retries"
 _DATA_KEY = "hookrelay:retry:data"
+
+_log = structlog.get_logger()
 
 
 def backoff_seconds(attempt: int) -> float:
@@ -72,8 +75,8 @@ _POLL_BATCH = 100
 # from the data hash. Does NOT remove entries — the caller must call cancel()
 # after a successful Kafka publish so that a crash between fetch and publish
 # leaves entries in Redis and they are retried on the next poll (at-least-once).
-# Members present in the ZSET but missing from the hash (should not happen;
-# defensive) are silently skipped.
+# Members present in the ZSET but missing from the hash are removed (ZREM) so
+# corrupted/inconsistent state self-heals rather than being re-scanned forever.
 _POLL_SCRIPT = """
 local members = redis.call('ZRANGEBYSCORE', KEYS[1], '-inf', ARGV[1], 'LIMIT', 0, ARGV[2])
 if #members == 0 then return {} end
@@ -82,6 +85,8 @@ for _, member in ipairs(members) do
     local data = redis.call('HGET', KEYS[2], member)
     if data then
         table.insert(results, data)
+    else
+        redis.call('ZREM', KEYS[1], member)
     end
 end
 return results
@@ -144,7 +149,13 @@ class RedisRetryScheduler:
             keys=[_ZSET_KEY, _DATA_KEY],
             args=[timestamp, _POLL_BATCH],
         )
-        return [json.loads(entry) for entry in raw_entries]
+        results = []
+        for entry in raw_entries:
+            try:
+                results.append(json.loads(entry))
+            except json.JSONDecodeError:
+                _log.error("scheduler.corrupt_payload", raw=entry[:200])
+        return results
 
     async def cancel(self, event_id: UUID, endpoint_id: UUID) -> None:
         member = self._member(event_id, endpoint_id)
