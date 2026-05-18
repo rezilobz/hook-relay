@@ -1,10 +1,42 @@
 services:
+  api:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-hookrelay}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-hookrelay}
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9093
+      API_KEY: ${API_KEY}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+
+  worker:
+    build: .
+    command: ["hookrelay-worker"]
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-hookrelay}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-hookrelay}
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9093
+      REDIS_URL: redis://redis:6379/0
+      API_KEY: ${API_KEY}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
   postgres:
     image: postgres:18.3
     restart: unless-stopped
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-hookrelay}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-hookrelay}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_DB: ${POSTGRES_DB:-hookrelay}
     ports:
       - "5432:5432"
@@ -38,9 +70,24 @@ services:
     volumes:
       - kafka_data:/var/lib/kafka/data
     healthcheck:
-      test: ["CMD-SHELL", "kafka-topics.sh --bootstrap-server localhost:9092 --list"]
-      interval: 15s
-      timeout: 10s
+      test: ["CMD-SHELL", "bash -c '</dev/tcp/localhost/9092'"]
+      interval: 5s
+      timeout: 5s
+      retries: 15
+      start_period: 15s
+
+  redis:
+    image: redis:8-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
       retries: 10
 
   prometheus:
@@ -77,5 +124,6 @@ services:
 volumes:
   postgres_data:
   kafka_data:
+  redis_data:
   prometheus_data:
   grafana_data:

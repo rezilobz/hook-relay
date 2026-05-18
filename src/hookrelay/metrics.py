@@ -21,7 +21,7 @@ delivery_latency_seconds = Histogram(
 retry_depth = Histogram(
     "hookrelay_retry_depth",
     "Attempt number at time of successful delivery",
-    buckets=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
+    buckets=list(range(16)),
 )
 
 dlq_entries_total = Gauge(

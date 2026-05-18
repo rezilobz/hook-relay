@@ -5,6 +5,7 @@ import uuid
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 
+from hookrelay import metrics
 from hookrelay.api.dependencies import DB, Producer, require_api_key
 from hookrelay.api.schemas.dlq import DLQEntryResponse
 from hookrelay.config import settings
@@ -45,6 +46,7 @@ async def replay_dlq_entry(dlq_id: uuid.UUID, db: DB, producer: Producer) -> DLQ
     # for a safe retry with no duplicate Kafka messages.
     await producer.publish(settings.kafka_topic_pending, {"event_id": str(entry.event_id)})
     await db.commit()
+    metrics.dlq_entries_total.dec()
 
     # expire_on_commit=False keeps entry attributes readable after deletion
     return entry
@@ -57,3 +59,4 @@ async def delete_dlq_entry(dlq_id: uuid.UUID, db: DB) -> None:
         raise HTTPException(status_code=404, detail="DLQ entry not found")
     await db.delete(entry)
     await db.commit()
+    metrics.dlq_entries_total.dec()
