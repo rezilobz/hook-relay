@@ -35,8 +35,7 @@ def create_app() -> FastAPI:
     app.include_router(endpoints_router.router)
     app.include_router(events_router.router)
     app.include_router(dlq_router.router)
-    metrics_app = make_prometheus_asgi_app()
-    app.mount("/metrics", metrics_app)
+    app.mount("/metrics", make_prometheus_asgi_app())
     return app
 
 

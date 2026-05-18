@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import (
     async_sessionmaker,
     create_async_engine,
 )
+from testcontainers.kafka import KafkaContainer
 from testcontainers.postgres import PostgresContainer
 
 from hookrelay.api.dependencies import get_producer as get_producer_dep
@@ -42,6 +43,13 @@ def postgres_url() -> Generator[str, None, None]:
         yield container.get_connection_url().replace(
             "postgresql+psycopg2://", "postgresql+asyncpg://"
         )
+
+
+@pytest.fixture(scope="session")
+def kafka_bootstrap_servers() -> Generator[str, None, None]:
+    """Session-scoped real Kafka broker for end-to-end tests."""
+    with KafkaContainer() as container:
+        yield container.get_bootstrap_server()
 
 
 @pytest.fixture()
