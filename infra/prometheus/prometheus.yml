@@ -7,11 +7,16 @@ scrape_configs:
     static_configs:
       - targets: ["localhost:9090"]
 
-  # Scrapes the HookRelay app running on the host machine.
-  # host.docker.internal resolves to the Docker host from inside a container.
-  # When the app runs inside Docker Compose, change this to the service name (e.g. hookrelay-api:8000).
-  - job_name: hookrelay
+  # HookRelay API — ingestion counters, DLQ gauge changes from replay/delete.
+  - job_name: hookrelay-api
     static_configs:
-      - targets: ["host.docker.internal:8000"]
-    metrics_path: /metrics
+      - targets: ["api:8000"]
+    metrics_path: /metrics/
+    scrape_interval: 5s
+
+  # HookRelay worker — delivery counters, latency, retry depth, DLQ gauge, Kafka lag.
+  # The worker exposes a lightweight prometheus_client HTTP server on port 8001.
+  - job_name: hookrelay-worker
+    static_configs:
+      - targets: ["worker:8001"]
     scrape_interval: 5s

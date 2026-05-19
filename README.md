@@ -332,7 +332,7 @@ A Grafana dashboard definition is included at `infra/grafana/dashboard.json`.
 - [x] Delivery attempt history
 - [x] HMAC-SHA256 payload signing
 - [x] Docker Compose local stack
-- [ ] Prometheus metrics
+- [x] Prometheus metrics
 
 ### v0.2 — Operational hardening
 - [ ] Retry deduplication token (prevent duplicate Kafka messages on concurrent manual retries)

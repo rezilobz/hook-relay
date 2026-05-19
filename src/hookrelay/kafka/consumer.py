@@ -71,3 +71,20 @@ class HookRelayConsumer:
 
     def deserialize(self, raw: bytes) -> dict[str, Any]:
         return cast(dict[str, Any], json.loads(raw.decode("utf-8")))
+
+    async def fetch_lags(self) -> dict[TopicPartition, int]:
+        """Return per-partition consumer group lag (high watermark - committed offset).
+
+        aiokafka's committed() returns int | None, not OffsetAndMetadata.
+        """
+        assigned = self.assignment()
+        if not assigned:
+            return {}
+        end_offsets: dict[TopicPartition, int] = await self._consumer.end_offsets(list(assigned))
+        lags: dict[TopicPartition, int] = {}
+        for tp in assigned:
+            end = end_offsets.get(tp, 0)
+            committed: int | None = await self._consumer.committed(tp)
+            position = committed if committed is not None else 0
+            lags[tp] = max(0, end - position)
+        return lags
