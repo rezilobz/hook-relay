@@ -3,11 +3,11 @@
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import select
+from sqlalchemy import delete, select
 
 from hookrelay.api.dependencies import DB, require_api_key
 from hookrelay.api.schemas.endpoints import EndpointCreate, EndpointResponse, EndpointUpdate
-from hookrelay.db.models import Endpoint
+from hookrelay.db.models import DeliveryAttempt, DLQEntry, Endpoint
 
 router = APIRouter(
     prefix="/endpoints",
@@ -61,5 +61,7 @@ async def delete_endpoint(endpoint_id: uuid.UUID, db: DB) -> None:
     endpoint = result.scalar_one_or_none()
     if endpoint is None:
         raise HTTPException(status_code=404, detail="Endpoint not found")
+    await db.execute(delete(DeliveryAttempt).where(DeliveryAttempt.endpoint_id == endpoint_id))
+    await db.execute(delete(DLQEntry).where(DLQEntry.endpoint_id == endpoint_id))
     await db.delete(endpoint)
     await db.commit()
