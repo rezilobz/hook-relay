@@ -61,7 +61,7 @@ class RetryScheduler(Protocol):
         """
         ...
 
-    async def cancel(self, event_id: UUID, endpoint_id: UUID) -> None:
+    async def cancel(self, event_id: UUID, endpoint_id: UUID, attempt_number: int) -> None:
         """Remove a scheduled retry entry, e.g. when moving an attempt to DLQ."""
         ...
 
@@ -125,8 +125,8 @@ class RedisRetryScheduler:
     async def close(self) -> None:
         await self._redis.aclose()
 
-    def _member(self, event_id: UUID, endpoint_id: UUID) -> str:
-        return f"{event_id}:{endpoint_id}"
+    def _member(self, event_id: UUID, endpoint_id: UUID, attempt_number: int) -> str:
+        return f"{event_id}:{endpoint_id}:{attempt_number}"
 
     async def schedule(
         self,
@@ -136,7 +136,7 @@ class RedisRetryScheduler:
         message: dict[str, Any],
     ) -> None:
         retry_after = time.time() + backoff_seconds(attempt_number)
-        member = self._member(event_id, endpoint_id)
+        member = self._member(event_id, endpoint_id, attempt_number)
         payload = json.dumps(message)
         await self._schedule_script(
             keys=[_DATA_KEY, _ZSET_KEY],
@@ -157,8 +157,8 @@ class RedisRetryScheduler:
                 _log.error("scheduler.corrupt_payload", raw=entry[:200])
         return results
 
-    async def cancel(self, event_id: UUID, endpoint_id: UUID) -> None:
-        member = self._member(event_id, endpoint_id)
+    async def cancel(self, event_id: UUID, endpoint_id: UUID, attempt_number: int) -> None:
+        member = self._member(event_id, endpoint_id, attempt_number)
         async with self._redis.pipeline(transaction=True) as pipe:
             pipe.zrem(_ZSET_KEY, member)
             pipe.hdel(_DATA_KEY, member)

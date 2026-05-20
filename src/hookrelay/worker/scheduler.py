@@ -38,8 +38,9 @@ async def run_scheduler(producer: HookRelayProducer, scheduler: RetryScheduler) 
             except (KeyError, ValueError):
                 log.error("scheduler.malformed_entry", message=str(message))
                 continue
+            attempt_number = int(message.get("attempt_number", 0))
             await producer.publish(settings.kafka_topic_pending, message)
-            await scheduler.cancel(event_id, endpoint_id)
+            await scheduler.cancel(event_id, endpoint_id, attempt_number)
             log.debug(
                 "scheduler.republished",
                 event_id=str(event_id),

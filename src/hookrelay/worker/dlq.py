@@ -21,6 +21,7 @@ async def move_to_dlq(
     event_id: UUID,
     endpoint_id: UUID,
     reason: str,
+    attempt_number: int = 0,
 ) -> None:
     """Write a DLQEntry, cancel any pending Redis retry, and publish a DLQ Kafka message.
 
@@ -43,7 +44,7 @@ async def move_to_dlq(
     inserted = result.rowcount == 1  # type: ignore[attr-defined]
 
     try:
-        await scheduler.cancel(event_id, endpoint_id)
+        await scheduler.cancel(event_id, endpoint_id, attempt_number)
     except Exception:
         log.warning(
             "dlq.cancel_retry_failed",

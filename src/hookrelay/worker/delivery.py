@@ -180,7 +180,7 @@ async def _deliver_to_endpoint(
             if is_permanent
             else f"Exhausted {settings.max_retry_attempts} attempts. Last status: {attempt_status}"
         )
-        await move_to_dlq(producer, scheduler, event.id, endpoint.id, reason)
+        await move_to_dlq(producer, scheduler, event.id, endpoint.id, reason, attempt_number)
     else:
         await scheduler.schedule(
             event.id,

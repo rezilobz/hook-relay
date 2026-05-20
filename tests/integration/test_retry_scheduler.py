@@ -66,7 +66,7 @@ class TestRedisRetryScheduler:
         event_id, endpoint_id = uuid.uuid4(), uuid.uuid4()
 
         await retry_scheduler.schedule(event_id, endpoint_id, 0, _msg(event_id, endpoint_id))
-        await retry_scheduler.cancel(event_id, endpoint_id)
+        await retry_scheduler.cancel(event_id, endpoint_id, 0)
         due = await retry_scheduler.poll_due(now=time.time() + 10_000)
 
         assert due == []
@@ -85,7 +85,7 @@ class TestRedisRetryScheduler:
         assert second == first
 
         # cancel() is the only way to remove the entry.
-        await retry_scheduler.cancel(event_id, endpoint_id)
+        await retry_scheduler.cancel(event_id, endpoint_id, 0)
         assert await retry_scheduler.poll_due(now=future) == []
 
     async def test_multiple_due_entries_all_returned(
@@ -106,8 +106,8 @@ class TestRedisRetryScheduler:
     async def test_cancel_is_idempotent(self, retry_scheduler: RedisRetryScheduler) -> None:
         event_id, endpoint_id = uuid.uuid4(), uuid.uuid4()
         # Cancelling an entry that was never scheduled must not raise.
-        await retry_scheduler.cancel(event_id, endpoint_id)
-        await retry_scheduler.cancel(event_id, endpoint_id)
+        await retry_scheduler.cancel(event_id, endpoint_id, 0)
+        await retry_scheduler.cancel(event_id, endpoint_id, 0)
 
     async def test_reschedule_overwrites_previous_entry(
         self, retry_scheduler: RedisRetryScheduler
@@ -167,7 +167,7 @@ class TestRunScheduler:
         msg = _msg(event_id, endpoint_id)
         producer = FakeProducer()
         iteration = 0
-        cancelled: list[tuple[uuid.UUID, uuid.UUID]] = []
+        cancelled: list[tuple[uuid.UUID, uuid.UUID, int]] = []
 
         async def mock_sleep(_: float) -> None:
             nonlocal iteration
@@ -179,8 +179,8 @@ class TestRunScheduler:
             async def poll_due(self, now: float | None = None) -> list[dict[str, Any]]:
                 return [msg] if iteration == 1 else []
 
-            async def cancel(self, eid: uuid.UUID, epid: uuid.UUID) -> None:
-                cancelled.append((eid, epid))
+            async def cancel(self, eid: uuid.UUID, epid: uuid.UUID, attempt_number: int) -> None:
+                cancelled.append((eid, epid, attempt_number))
 
         with patch("hookrelay.worker.scheduler.asyncio.sleep", side_effect=mock_sleep):
             with contextlib.suppress(asyncio.CancelledError):
@@ -191,15 +191,15 @@ class TestRunScheduler:
         assert topic == settings.kafka_topic_pending
         assert published_msg == msg
 
-        # cancel() must be called after each successful publish.
-        assert cancelled == [(event_id, endpoint_id)]
+        # cancel() must be called after each successful publish, with the attempt from the message.
+        assert cancelled == [(event_id, endpoint_id, 1)]
 
     async def test_cancel_called_for_each_published_entry(self) -> None:
         pairs = [(uuid.uuid4(), uuid.uuid4()) for _ in range(3)]
         messages = [_msg(eid, epid) for eid, epid in pairs]
         producer = FakeProducer()
         iteration = 0
-        cancelled: list[tuple[uuid.UUID, uuid.UUID]] = []
+        cancelled: list[tuple[uuid.UUID, uuid.UUID, int]] = []
 
         async def mock_sleep(_: float) -> None:
             nonlocal iteration
@@ -211,22 +211,22 @@ class TestRunScheduler:
             async def poll_due(self, now: float | None = None) -> list[dict[str, Any]]:
                 return messages if iteration == 1 else []
 
-            async def cancel(self, eid: uuid.UUID, epid: uuid.UUID) -> None:
-                cancelled.append((eid, epid))
+            async def cancel(self, eid: uuid.UUID, epid: uuid.UUID, attempt_number: int) -> None:
+                cancelled.append((eid, epid, attempt_number))
 
         with patch("hookrelay.worker.scheduler.asyncio.sleep", side_effect=mock_sleep):
             with contextlib.suppress(asyncio.CancelledError):
                 await run_scheduler(producer, MultiEntryScheduler())
 
         assert len(producer.published) == 3
-        assert cancelled == pairs
+        assert cancelled == [(eid, epid, 1) for eid, epid in pairs]
 
     async def test_failed_publish_does_not_cancel(self) -> None:
         """If Kafka publish raises, cancel() must not be called so the entry
         stays in Redis and is retried on the next scheduler poll."""
         msg = _msg(uuid.uuid4(), uuid.uuid4())
         producer = FakeProducer(should_fail=True)
-        cancelled: list[tuple[uuid.UUID, uuid.UUID]] = []
+        cancelled: list[tuple[uuid.UUID, uuid.UUID, int]] = []
 
         async def mock_sleep(_: float) -> None:
             pass
@@ -235,7 +235,7 @@ class TestRunScheduler:
             async def poll_due(self, now: float | None = None) -> list[dict[str, Any]]:
                 return [msg]
 
-            async def cancel(self, eid: uuid.UUID, epid: uuid.UUID) -> None:
+            async def cancel(self, eid: uuid.UUID, epid: uuid.UUID, attempt_number: int) -> None:
                 cancelled.append((eid, epid))
 
         with patch("hookrelay.worker.scheduler.asyncio.sleep", side_effect=mock_sleep):
@@ -262,7 +262,7 @@ class TestRunScheduler:
             async def poll_due(self, now: float | None = None) -> list[dict[str, Any]]:
                 return [bad_msg, good_msg] if iteration == 1 else []
 
-            async def cancel(self, eid: uuid.UUID, epid: uuid.UUID) -> None:
+            async def cancel(self, eid: uuid.UUID, epid: uuid.UUID, attempt_number: int) -> None:
                 pass
 
         with patch("hookrelay.worker.scheduler.asyncio.sleep", side_effect=mock_sleep):
@@ -288,7 +288,7 @@ class TestRunScheduler:
             async def poll_due(self, now: float | None = None) -> list[dict[str, Any]]:
                 return []
 
-            async def cancel(self, eid: uuid.UUID, epid: uuid.UUID) -> None:
+            async def cancel(self, eid: uuid.UUID, epid: uuid.UUID, attempt_number: int) -> None:
                 pass
 
         with patch("hookrelay.worker.scheduler.asyncio.sleep", side_effect=mock_sleep):
