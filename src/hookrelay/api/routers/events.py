@@ -86,14 +86,16 @@ async def get_event(event_id: uuid.UUID, db: DB) -> Event:
 
     if succeeded + exhausted + retrying == 0:
         event.status = "pending"
-    elif retrying > 0:
-        event.status = "pending" if succeeded == 0 else "partially_delivered"
-    elif succeeded > 0 and exhausted == 0:
+    elif succeeded == 0 and retrying > 0:
+        event.status = "retrying"
+    elif succeeded > 0 and exhausted == 0 and retrying == 0:
         event.status = "delivered"
-    elif exhausted > 0 and succeeded == 0:
-        event.status = "dlq"
-    else:
+    elif succeeded > 0 and retrying > 0:
+        event.status = "partially_retrying"
+    elif succeeded > 0 and exhausted > 0 and retrying == 0:
         event.status = "partially_delivered"
+    else:
+        event.status = "dlq"
 
     return event
 

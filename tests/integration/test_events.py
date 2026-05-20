@@ -336,7 +336,7 @@ class TestGetEventDerivedStatus:
 
         assert resp.json()["status"] == "pending"
 
-    async def test_single_failure_returns_pending(
+    async def test_single_failure_returns_retrying(
         self, client: AsyncClient, db: AsyncSession, fake_producer: FakeProducer
     ) -> None:
         # One failure with no DLQ means the endpoint is still in the retry cycle.
@@ -348,9 +348,9 @@ class TestGetEventDerivedStatus:
 
         resp = await client.get(f"/events/{created['id']}", headers=AUTH)
 
-        assert resp.json()["status"] == "pending"
+        assert resp.json()["status"] == "retrying"
 
-    async def test_multiple_failures_same_endpoint_returns_pending(
+    async def test_multiple_failures_same_endpoint_returns_retrying(
         self, client: AsyncClient, db: AsyncSession, fake_producer: FakeProducer
     ) -> None:
         # Three failure attempts (attempt_number 1-3) — still retrying, not exhausted.
@@ -364,9 +364,9 @@ class TestGetEventDerivedStatus:
 
         resp = await client.get(f"/events/{created['id']}", headers=AUTH)
 
-        assert resp.json()["status"] == "pending"
+        assert resp.json()["status"] == "retrying"
 
-    async def test_timeout_attempt_returns_pending(
+    async def test_timeout_attempt_returns_retrying(
         self, client: AsyncClient, db: AsyncSession, fake_producer: FakeProducer
     ) -> None:
         # timeout is not a success; endpoint is still in the retry cycle.
@@ -378,9 +378,9 @@ class TestGetEventDerivedStatus:
 
         resp = await client.get(f"/events/{created['id']}", headers=AUTH)
 
-        assert resp.json()["status"] == "pending"
+        assert resp.json()["status"] == "retrying"
 
-    async def test_all_endpoints_retrying_returns_pending(
+    async def test_all_endpoints_failing_returns_retrying(
         self, client: AsyncClient, db: AsyncSession, fake_producer: FakeProducer
     ) -> None:
         # Two endpoints each with failures but no DLQ — both still retrying.
@@ -392,7 +392,7 @@ class TestGetEventDerivedStatus:
 
         resp = await client.get(f"/events/{created['id']}", headers=AUTH)
 
-        assert resp.json()["status"] == "pending"
+        assert resp.json()["status"] == "retrying"
 
     # ── delivered ─────────────────────────────────────────────────────────────
 
@@ -495,7 +495,7 @@ class TestGetEventDerivedStatus:
 
         assert resp.json()["status"] == "dlq"
 
-    # ── partially_delivered ───────────────────────────────────────────────────
+    # ── partially_delivered ── (terminal: some succeeded, rest exhausted) ────────
 
     async def test_success_and_dlq_returns_partially_delivered(
         self, client: AsyncClient, db: AsyncSession, fake_producer: FakeProducer
@@ -511,7 +511,9 @@ class TestGetEventDerivedStatus:
 
         assert resp.json()["status"] == "partially_delivered"
 
-    async def test_success_and_retrying_returns_partially_delivered(
+    # ── partially_retrying ── (in-flight: some succeeded, others still retrying) ─
+
+    async def test_success_and_retrying_returns_partially_retrying(
         self, client: AsyncClient, db: AsyncSession, fake_producer: FakeProducer
     ) -> None:
         # ep_a delivered, ep_b still in the retry cycle.
@@ -523,9 +525,9 @@ class TestGetEventDerivedStatus:
 
         resp = await client.get(f"/events/{created['id']}", headers=AUTH)
 
-        assert resp.json()["status"] == "partially_delivered"
+        assert resp.json()["status"] == "partially_retrying"
 
-    async def test_success_and_timeout_retrying_returns_partially_delivered(
+    async def test_success_and_timeout_retrying_returns_partially_retrying(
         self, client: AsyncClient, db: AsyncSession, fake_producer: FakeProducer
     ) -> None:
         created = await _ingest(client)
@@ -536,12 +538,12 @@ class TestGetEventDerivedStatus:
 
         resp = await client.get(f"/events/{created['id']}", headers=AUTH)
 
-        assert resp.json()["status"] == "partially_delivered"
+        assert resp.json()["status"] == "partially_retrying"
 
-    async def test_three_endpoints_success_dlq_retrying_returns_partially_delivered(
+    async def test_three_endpoints_success_dlq_retrying_returns_partially_retrying(
         self, client: AsyncClient, db: AsyncSession, fake_producer: FakeProducer
     ) -> None:
-        # ep_a succeeded, ep_b exhausted into DLQ, ep_c still retrying.
+        # ep_a succeeded, ep_b exhausted into DLQ, ep_c still retrying — not terminal.
         created = await _ingest(client)
         ep_a, ep_b, ep_c = (
             await _seed_endpoint(db),
@@ -556,7 +558,7 @@ class TestGetEventDerivedStatus:
 
         resp = await client.get(f"/events/{created['id']}", headers=AUTH)
 
-        assert resp.json()["status"] == "partially_delivered"
+        assert resp.json()["status"] == "partially_retrying"
 
     # ── isolation ─────────────────────────────────────────────────────────────
 

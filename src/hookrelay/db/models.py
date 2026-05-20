@@ -39,7 +39,8 @@ class Event(Base):
     idempotency_key: Mapped[str] = mapped_column(Text, unique=True)
     payload: Mapped[dict[str, Any]] = mapped_column(JSONB)
     # Read cache: source of truth is DeliveryAttempt rows. Single-row detail derives fresh;
-    # list queries use this field. Values: pending / delivered / partially_delivered / dlq.
+    # list queries use this field.
+    # Values: pending / retrying / delivered / partially_retrying / partially_delivered / dlq.
     status: Mapped[str] = mapped_column(Text, server_default="pending")
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
 

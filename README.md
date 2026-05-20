@@ -242,7 +242,7 @@ The HMAC-SHA256 signature sent in `X-HookRelay-Signature` is computed as `HMAC(p
 
 ### Why is event status both stored and derived?
 
-The `Event` table carries a `status` column (`pending` / `delivered` / `partially_delivered` / `dlq`) for fast list queries. Without it, `GET /events` would require joining against `DeliveryAttempt` and aggregating per event — expensive at scale. However, a stored field can drift out of sync if a worker crashes mid-update. The resolution: the stored `status` is a read cache updated asynchronously by workers, but the source of truth is always the `DeliveryAttempt` records. `GET /events/{id}` (single event detail) derives status fresh from attempts. `GET /events` (list) uses the stored field. Inconsistencies are transient and self-correcting as workers complete.
+The `Event` table carries a `status` column (`pending` / `retrying` / `delivered` / `partially_retrying` / `partially_delivered` / `dlq`) for fast list queries. Without it, `GET /events` would require joining against `DeliveryAttempt` and aggregating per event — expensive at scale. However, a stored field can drift out of sync if a worker crashes mid-update. The resolution: the stored `status` is a read cache updated asynchronously by workers, but the source of truth is always the `DeliveryAttempt` records. `GET /events/{id}` (single event detail) derives status fresh from attempts. `GET /events` (list) uses the stored field. Inconsistencies are transient and self-correcting as workers complete.
 
 ### Why Redis for retry scheduling, not a dedicated Kafka retry topic?
 
