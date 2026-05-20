@@ -224,7 +224,7 @@ class TestDeliverToEndpoint:
             event, endpoint, 0, _http_client(status_code=500), fake_producer, fake_scheduler
         )
 
-        assert (event.id, endpoint.id) in fake_scheduler.cancelled
+        assert (event.id, endpoint.id, 0) in fake_scheduler.cancelled
 
     async def test_exhausted_publishes_to_dlq_topic(
         self,
@@ -486,9 +486,9 @@ class TestMoveToDeadLetterQueue:
         event = await _seed_event(worker_session_factory)
         endpoint = await _seed_endpoint(worker_session_factory)
 
-        await move_to_dlq(fake_producer, fake_scheduler, event.id, endpoint.id, "exhausted")
+        await move_to_dlq(fake_producer, fake_scheduler, event.id, endpoint.id, "exhausted", 0)
 
-        assert (event.id, endpoint.id) in fake_scheduler.cancelled
+        assert (event.id, endpoint.id, 0) in fake_scheduler.cancelled
 
     async def test_publishes_to_dlq_kafka_topic(
         self,

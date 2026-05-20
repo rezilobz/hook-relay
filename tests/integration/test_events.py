@@ -8,7 +8,8 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from hookrelay.config import settings
-from hookrelay.db.models import DeliveryAttempt, DLQEntry, Endpoint, Event
+from hookrelay.db.models import DeliveryAttempt, DLQEntry, Endpoint, OutboxEntry
+from hookrelay.worker.outbox import _relay_batch
 from tests.integration.conftest import FakeProducer
 
 AUTH = {settings.api_key_header: settings.api_key}
@@ -46,16 +47,16 @@ class TestIngestEvent:
         assert "id" in data
         assert "created_at" in data
 
-    async def test_publishes_to_pending_topic(
-        self, client: AsyncClient, fake_producer: FakeProducer
+    async def test_writes_outbox_row_on_ingest(
+        self, client: AsyncClient, db: AsyncSession, fake_producer: FakeProducer
     ) -> None:
         resp = await client.post("/events", json=VALID_BODY, headers=AUTH)
-        event_id = resp.json()["id"]
+        event_id = uuid.UUID(resp.json()["id"])
 
-        assert len(fake_producer.published) == 1
-        topic, message = fake_producer.published[0]
-        assert topic == settings.kafka_topic_pending
-        assert message == {"event_id": event_id}
+        result = await db.execute(select(OutboxEntry).where(OutboxEntry.event_id == event_id))
+        entry = result.scalar_one_or_none()
+        assert entry is not None
+        assert entry.event_id == event_id
 
     async def test_duplicate_idempotency_key_returns_same_event(
         self, client: AsyncClient, fake_producer: FakeProducer
@@ -67,15 +68,16 @@ class TestIngestEvent:
         assert resp.status_code == 201
         assert resp.json()["id"] == first["id"]
 
-    async def test_duplicate_does_not_publish_to_kafka(
-        self, client: AsyncClient, fake_producer: FakeProducer
+    async def test_duplicate_does_not_write_outbox_row(
+        self, client: AsyncClient, db: AsyncSession, fake_producer: FakeProducer
     ) -> None:
         await _ingest(client)
-        fake_producer.published.clear()
 
         await client.post("/events", json=VALID_BODY, headers=AUTH)
 
-        assert len(fake_producer.published) == 0
+        result = await db.execute(select(OutboxEntry))
+        rows = result.scalars().all()
+        assert len(rows) == 1
 
     async def test_missing_auth_header_returns_422(
         self, client: AsyncClient, fake_producer: FakeProducer
@@ -92,47 +94,76 @@ class TestIngestEvent:
         assert resp.status_code == 401
 
 
-# ─── POST /events — Kafka failure (publish-before-commit contract) ────────────
+# ─── Outbox relay ────────────────────────────────────────────────────────────
 
 
 @pytest.mark.integration
-class TestIngestEventKafkaFailure:
-    """Verify that a Kafka publish failure leaves no persisted event (atomic rollback).
+class TestOutboxRelay:
+    """Verify that _relay_batch publishes outbox entries to Kafka and removes them."""
 
-    The publish-before-commit ordering means: if producer.publish() raises,
-    the exception propagates before db.commit() is called, the SQLAlchemy session
-    is closed without committing, and the INSERT is rolled back. The caller gets a
-    500 and can safely retry with the same idempotency_key.
-    """
-
-    async def test_kafka_failure_returns_500(self, failing_client: AsyncClient) -> None:
-        resp = await failing_client.post("/events", json=VALID_BODY, headers=AUTH)
-        assert resp.status_code == 500
-
-    async def test_kafka_failure_does_not_persist_event(
-        self, failing_client: AsyncClient, db: AsyncSession
+    async def test_relay_publishes_event_to_kafka(
+        self,
+        client: AsyncClient,
+        db: AsyncSession,
+        fake_producer: FakeProducer,
+        worker_session_factory: None,
     ) -> None:
-        await failing_client.post("/events", json=VALID_BODY, headers=AUTH)
+        resp = await _ingest(client)
+        event_id = resp["id"]
+        fake_producer.published.clear()
 
-        result = await db.execute(
-            select(Event).where(Event.idempotency_key == VALID_BODY["idempotency_key"])
-        )
+        await _relay_batch(fake_producer)
+
+        assert len(fake_producer.published) == 1
+        topic, message = fake_producer.published[0]
+        assert topic == settings.kafka_topic_pending
+        assert message == {"event_id": event_id}
+
+    async def test_relay_deletes_outbox_row_after_publish(
+        self,
+        client: AsyncClient,
+        db: AsyncSession,
+        fake_producer: FakeProducer,
+        worker_session_factory: None,
+    ) -> None:
+        resp = await _ingest(client)
+        event_id = uuid.UUID(resp["id"])
+
+        await _relay_batch(fake_producer)
+
+        result = await db.execute(select(OutboxEntry).where(OutboxEntry.event_id == event_id))
         assert result.scalar_one_or_none() is None
 
-    async def test_retry_after_kafka_failure_succeeds(
+    async def test_relay_does_nothing_when_outbox_is_empty(
         self,
-        failing_client: AsyncClient,
-        client: AsyncClient,
+        db: AsyncSession,
         fake_producer: FakeProducer,
+        worker_session_factory: None,
     ) -> None:
-        # First attempt: Kafka down, event rolled back.
-        await failing_client.post("/events", json=VALID_BODY, headers=AUTH)
+        await _relay_batch(fake_producer)
 
-        # Second attempt (Kafka up): must be treated as a fresh insert, not a duplicate.
-        resp = await client.post("/events", json=VALID_BODY, headers=AUTH)
+        assert fake_producer.published == []
 
-        assert resp.status_code == 201
-        assert len(fake_producer.published) == 1
+    async def test_relay_publishes_multiple_events_in_order(
+        self,
+        client: AsyncClient,
+        db: AsyncSession,
+        fake_producer: FakeProducer,
+        worker_session_factory: None,
+    ) -> None:
+        a = await _ingest(
+            client, {"event_type": "order.created", "idempotency_key": "relay-a", "payload": {}}
+        )
+        b = await _ingest(
+            client, {"event_type": "order.created", "idempotency_key": "relay-b", "payload": {}}
+        )
+        fake_producer.published.clear()
+
+        await _relay_batch(fake_producer)
+
+        published_ids = [msg["event_id"] for _, msg in fake_producer.published]
+        assert set(published_ids) == {a["id"], b["id"]}
+        assert len(published_ids) == 2
 
 
 # ─── GET /events/{id} ─────────────────────────────────────────────────────────
@@ -263,7 +294,7 @@ class TestRetryEvent:
         result = await db.execute(select(DLQEntry).where(DLQEntry.event_id == eid))
         assert result.scalars().all() == []
 
-    async def test_derived_status_is_pending_after_retry_from_dlq(
+    async def test_derived_status_is_retrying_after_retry_from_dlq(
         self, client: AsyncClient, db: AsyncSession, fake_producer: FakeProducer
     ) -> None:
         created = await _ingest(client)
@@ -275,7 +306,7 @@ class TestRetryEvent:
         await client.post(f"/events/{created['id']}/retry", headers=AUTH)
         resp = await client.get(f"/events/{created['id']}", headers=AUTH)
 
-        assert resp.json()["status"] == "pending"
+        assert resp.json()["status"] == "retrying"
 
 
 # ─── GET /events/{id} — derived status ───────────────────────────────────────
@@ -336,7 +367,7 @@ class TestGetEventDerivedStatus:
 
         assert resp.json()["status"] == "pending"
 
-    async def test_single_failure_returns_pending(
+    async def test_single_failure_returns_retrying(
         self, client: AsyncClient, db: AsyncSession, fake_producer: FakeProducer
     ) -> None:
         # One failure with no DLQ means the endpoint is still in the retry cycle.
@@ -348,9 +379,9 @@ class TestGetEventDerivedStatus:
 
         resp = await client.get(f"/events/{created['id']}", headers=AUTH)
 
-        assert resp.json()["status"] == "pending"
+        assert resp.json()["status"] == "retrying"
 
-    async def test_multiple_failures_same_endpoint_returns_pending(
+    async def test_multiple_failures_same_endpoint_returns_retrying(
         self, client: AsyncClient, db: AsyncSession, fake_producer: FakeProducer
     ) -> None:
         # Three failure attempts (attempt_number 1-3) — still retrying, not exhausted.
@@ -364,9 +395,9 @@ class TestGetEventDerivedStatus:
 
         resp = await client.get(f"/events/{created['id']}", headers=AUTH)
 
-        assert resp.json()["status"] == "pending"
+        assert resp.json()["status"] == "retrying"
 
-    async def test_timeout_attempt_returns_pending(
+    async def test_timeout_attempt_returns_retrying(
         self, client: AsyncClient, db: AsyncSession, fake_producer: FakeProducer
     ) -> None:
         # timeout is not a success; endpoint is still in the retry cycle.
@@ -378,9 +409,9 @@ class TestGetEventDerivedStatus:
 
         resp = await client.get(f"/events/{created['id']}", headers=AUTH)
 
-        assert resp.json()["status"] == "pending"
+        assert resp.json()["status"] == "retrying"
 
-    async def test_all_endpoints_retrying_returns_pending(
+    async def test_all_endpoints_failing_returns_retrying(
         self, client: AsyncClient, db: AsyncSession, fake_producer: FakeProducer
     ) -> None:
         # Two endpoints each with failures but no DLQ — both still retrying.
@@ -392,7 +423,7 @@ class TestGetEventDerivedStatus:
 
         resp = await client.get(f"/events/{created['id']}", headers=AUTH)
 
-        assert resp.json()["status"] == "pending"
+        assert resp.json()["status"] == "retrying"
 
     # ── delivered ─────────────────────────────────────────────────────────────
 
@@ -495,7 +526,7 @@ class TestGetEventDerivedStatus:
 
         assert resp.json()["status"] == "dlq"
 
-    # ── partially_delivered ───────────────────────────────────────────────────
+    # ── partially_delivered ── (terminal: some succeeded, rest exhausted) ────────
 
     async def test_success_and_dlq_returns_partially_delivered(
         self, client: AsyncClient, db: AsyncSession, fake_producer: FakeProducer
@@ -511,7 +542,9 @@ class TestGetEventDerivedStatus:
 
         assert resp.json()["status"] == "partially_delivered"
 
-    async def test_success_and_retrying_returns_partially_delivered(
+    # ── partially_retrying ── (in-flight: some succeeded, others still retrying) ─
+
+    async def test_success_and_retrying_returns_partially_retrying(
         self, client: AsyncClient, db: AsyncSession, fake_producer: FakeProducer
     ) -> None:
         # ep_a delivered, ep_b still in the retry cycle.
@@ -523,9 +556,9 @@ class TestGetEventDerivedStatus:
 
         resp = await client.get(f"/events/{created['id']}", headers=AUTH)
 
-        assert resp.json()["status"] == "partially_delivered"
+        assert resp.json()["status"] == "partially_retrying"
 
-    async def test_success_and_timeout_retrying_returns_partially_delivered(
+    async def test_success_and_timeout_retrying_returns_partially_retrying(
         self, client: AsyncClient, db: AsyncSession, fake_producer: FakeProducer
     ) -> None:
         created = await _ingest(client)
@@ -536,12 +569,12 @@ class TestGetEventDerivedStatus:
 
         resp = await client.get(f"/events/{created['id']}", headers=AUTH)
 
-        assert resp.json()["status"] == "partially_delivered"
+        assert resp.json()["status"] == "partially_retrying"
 
-    async def test_three_endpoints_success_dlq_retrying_returns_partially_delivered(
+    async def test_three_endpoints_success_dlq_retrying_returns_partially_retrying(
         self, client: AsyncClient, db: AsyncSession, fake_producer: FakeProducer
     ) -> None:
-        # ep_a succeeded, ep_b exhausted into DLQ, ep_c still retrying.
+        # ep_a succeeded, ep_b exhausted into DLQ, ep_c still retrying — not terminal.
         created = await _ingest(client)
         ep_a, ep_b, ep_c = (
             await _seed_endpoint(db),
@@ -556,7 +589,7 @@ class TestGetEventDerivedStatus:
 
         resp = await client.get(f"/events/{created['id']}", headers=AUTH)
 
-        assert resp.json()["status"] == "partially_delivered"
+        assert resp.json()["status"] == "partially_retrying"
 
     # ── isolation ─────────────────────────────────────────────────────────────
 

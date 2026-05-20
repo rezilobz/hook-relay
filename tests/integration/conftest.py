@@ -74,7 +74,7 @@ class FakeScheduler:
 
     def __init__(self) -> None:
         self.scheduled: list[tuple[UUID, UUID, int, dict[str, Any]]] = []
-        self.cancelled: list[tuple[UUID, UUID]] = []
+        self.cancelled: list[tuple[UUID, UUID, int]] = []
 
     async def schedule(
         self,
@@ -88,8 +88,8 @@ class FakeScheduler:
     async def poll_due(self, now: float | None = None) -> list[dict[str, Any]]:
         return []
 
-    async def cancel(self, event_id: UUID, endpoint_id: UUID) -> None:
-        self.cancelled.append((event_id, endpoint_id))
+    async def cancel(self, event_id: UUID, endpoint_id: UUID, attempt_number: int) -> None:
+        self.cancelled.append((event_id, endpoint_id, attempt_number))
 
 
 @pytest.fixture()
@@ -114,6 +114,7 @@ def worker_session_factory(async_engine: AsyncEngine):
     with (
         patch("hookrelay.worker.delivery.AsyncSessionLocal", factory),
         patch("hookrelay.worker.dlq.AsyncSessionLocal", factory),
+        patch("hookrelay.worker.outbox.AsyncSessionLocal", factory),
     ):
         yield factory
 

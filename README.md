@@ -39,42 +39,39 @@ HookRelay solves these problems with a Kafka-backed architecture purpose-built f
 ```
                         ┌─────────────────────────────────────────────────────┐
                         │                    HookRelay                        │
-                        │                                                     │
-  Your Application      │  ┌─────────────┐     ┌───────────────────────────┐  │
-        │               │  │             │     │                           │  │
-        │  POST /events │  │   FastAPI   │     │     Kafka Topics          │  │
-        └──────────────►│  │  Ingestion  ├────►│                           │  │
-                        │  │   API       │     │  hookrelay.events.pending │  │
-                        │  └─────────────┘     │  hookrelay.events.dlq     │  │
-                        │                      │                           │  │
-                        │  ┌─────────────┐     └──────────┬────────────────┘  │
-                        │  │             │                │                   │
-                        │  │  Control    │     ┌──────────▼───────────────┐   │
-                        │  │  Plane API  │     │                          │   │
-                        │  │  (FastAPI)  │     │   Delivery Worker Pool   │   │
-                        │  │             │     │                          │   │
-                        │  │  /endpoints │     │  ┌────────────────────┐  │   │
-                        │  │  /events    │     │  │  Retry Scheduler   │  │   │
-                        │  │  /deliveries│     │  │  (Redis ZSET)      │  │   │
-                        │  │             │     │  └────────────────────┘  │   │
-                        │  └──────┬──────┘     │                          │   │
-                        │         │            │  ┌────────────────────┐  │   │
-                        │         │            │  │  DLQ Handler       │  │   │
-                        │  ┌──────▼──────┐     │  └────────────────────┘  │   │
-                        │  │             │     │                          │   │
-                        │  │ PostgreSQL  │◄────┤  Delivery Attempt Log    │   │
-                        │  │             │     │  Idempotency Check       │   │
-                        │  │  endpoints  │     │                          │   │
-                        │  │  events     │     └──────────┬───────────────┘   │
-                        │  │  deliveries │                │                   │
-                        │  │  dlq        │                │  HTTPS POST       │
-                        │  │             │                ▼                   │
-                        │  └─────────────┘     Customer Endpoint              │
-                        │                                                     │
+  Your Application      │  ┌─────────────┐                                    │
+        │               │  │  FastAPI    │  INSERT event                      │
+        │  POST /events │  │  Ingestion  │  INSERT outbox  ┌────────────────┐ │
+        └───────────────┼─►│  API        ├────────────────►│   PostgreSQL   │ │
+                        │  └─────────────┘  (same tx)      │                │ │
+                        │                                  │  endpoints     │ │
+                        │                                  │  events        │ │
+                        │  ┌─────────────┐  poll outbox    │  outbox        │ │
+                        │  │   Outbox    │◄────────────────│  deliveries    │ │
+                        │  │   Relay     │  delete row     │  dlq           │ │
+                        │  └──────┬──────┘  (after pub)    └───────▲────────┘ │
+                        │         │ publish                        │          │
+                        │  ┌──────▼────────────────────┐           │          │
+                        │  │     Kafka Topics          │           │          │
+                        │  │  hookrelay.events.pending │           │          │
+                        │  │  hookrelay.events.dlq     │           │          │
+                        │  └──────────┬────────────────┘           │          │
+                        │             │                            │          │
+                        │  ┌──────────▼───────────────┐            │          │
+                        │  │   Delivery Worker Pool   ├────────────┘          │
+                        │  │  ┌────────────────────┐  │  write attempts       │
+                        │  │  │  Retry Scheduler   │  │                       │
+                        │  │  │  (Redis ZSET)      │  │                       │
+                        │  │  └────────────────────┘  │                       │
+                        │  │  ┌────────────────────┐  │                       │
+                        │  │  │  DLQ Handler       │  │                       │
+                        │  │  └────────────────────┘  │                       │
+                        │  └──────────┬───────────────┘                       │
+                        │             │                                       │
+                        │             └───── HTTPS POST ──────────────────────┼──► Customer Endpoint
                         │  ┌─────────────┐  ┌─────────────┐                   │
                         │  │  Prometheus │  │    Redis    │  retry ZSET       │
                         │  │  + Grafana  │  │    (AOF)    │  scheduler        │
-                        │  │             │  │             │                   │
                         │  └─────────────┘  └─────────────┘                   │
                         └─────────────────────────────────────────────────────┘
 ```
@@ -83,13 +80,14 @@ HookRelay solves these problems with a Kafka-backed architecture purpose-built f
 
 | Component | Role |
 |---|---|
-| **Ingestion API** | Accepts incoming events from your application, validates payload, publishes to Kafka `events.pending` topic. Responds immediately — no synchronous delivery. |
+| **Ingestion API** | Accepts incoming events from your application, validates payload, writes `Event` and `OutboxEntry` rows atomically in a single DB transaction. Responds immediately — no synchronous Kafka publish. |
+| **Outbox Relay** | Background coroutine (`run_outbox_relay`) that polls the `outbox` table with `SELECT … FOR UPDATE SKIP LOCKED`, publishes each pending entry to Kafka `events.pending`, then deletes the row. Guarantees no event is lost even if the API process crashes after committing. |
 | **Control Plane API** | CRUD for endpoint registration (URL, secret, event filters, enabled/disabled). Delivery history queries. Manual retry triggers. |
 | **Kafka** | Durable event backbone. Two topics: `pending` for fresh events, `dlq` for exhausted deliveries. Retry scheduling is handled by Redis, not a dedicated Kafka topic. |
 | **Delivery Worker Pool** | Consumes from Kafka, attempts HTTPS delivery to registered endpoints, writes attempt result to PostgreSQL, routes to retry or DLQ on failure. |
 | **Retry Scheduler** | Coroutine that polls a Redis ZSET for due retries and republishes to `hookrelay.events.pending`. Computes next attempt time using exponential backoff with jitter. |
 | **Redis** | Stores scheduled retry entries as a sorted set (score = `retry_after` Unix timestamp). AOF persistence must be enabled — a Redis restart without AOF would silently discard all pending retries. |
-| **PostgreSQL** | Source of truth for endpoint configuration, event metadata, and full delivery attempt history. |
+| **PostgreSQL** | Source of truth for endpoint configuration, event metadata, outbox relay queue, and full delivery attempt history. |
 | **Prometheus + Grafana** | Tracks delivery success rate, retry depth distribution, Kafka consumer group lag, DLQ entry rate, and per-endpoint failure rates. |
 
 ---
@@ -242,7 +240,7 @@ The HMAC-SHA256 signature sent in `X-HookRelay-Signature` is computed as `HMAC(p
 
 ### Why is event status both stored and derived?
 
-The `Event` table carries a `status` column (`pending` / `delivered` / `partially_delivered` / `dlq`) for fast list queries. Without it, `GET /events` would require joining against `DeliveryAttempt` and aggregating per event — expensive at scale. However, a stored field can drift out of sync if a worker crashes mid-update. The resolution: the stored `status` is a read cache updated asynchronously by workers, but the source of truth is always the `DeliveryAttempt` records. `GET /events/{id}` (single event detail) derives status fresh from attempts. `GET /events` (list) uses the stored field. Inconsistencies are transient and self-correcting as workers complete.
+The `Event` table carries a `status` column (`pending` / `retrying` / `delivered` / `partially_retrying` / `partially_delivered` / `dlq`) for fast list queries. Without it, `GET /events` would require joining against `DeliveryAttempt` and aggregating per event — expensive at scale. However, a stored field can drift out of sync if a worker crashes mid-update. The resolution: the stored `status` is a read cache updated asynchronously by workers, but the source of truth is always the `DeliveryAttempt` records. `GET /events/{id}` (single event detail) derives status fresh from attempts. `GET /events` (list) uses the stored field. Inconsistencies are transient and self-correcting as workers complete.
 
 ### Why Redis for retry scheduling, not a dedicated Kafka retry topic?
 
@@ -254,13 +252,15 @@ Redis also unlocks per-endpoint rate limiting and circuit breaker state in v0.2 
 
 **Scheduler delivery semantics:** The poll-and-republish flow is two-phase, not atomic. A Lua script fetches due entries from the ZSET (`ZRANGEBYSCORE` + `HGET`) without removing them. Each entry is published to `hookrelay.events.pending`, then removed from Redis via `cancel()` (`ZREM` + `HDEL`). A crash between publish and cancel leaves the entry in Redis; it will be re-fetched on the next poll and produce a duplicate Kafka message, which the delivery worker's idempotency check suppresses. This gives at-least-once delivery with no message loss.
 
-### Why publish to Kafka before committing, not after?
+### Why the transactional outbox pattern instead of publishing to Kafka directly?
 
-Publishing before commit means a Kafka failure rolls back the DB transaction — the event is never persisted without a corresponding worker signal. The client gets a 500 and can safely retry with the same idempotency key, which will be treated as a fresh insert.
+The original approach published to Kafka inside the request handler, before calling `db.commit()`. This created a dual-write gap: if the DB commit succeeded but the process crashed immediately after, the event was persisted with no corresponding Kafka message — silently stuck, never delivered.
 
-The reverse failure mode — DB commit failing after a successful Kafka publish — produces an orphan message for an `event_id` that was never committed. The worker queries the DB for that `event_id`, finds nothing, and skips the message. The client sees a 500 and retries; the idempotency key insert lands cleanly since the first transaction rolled back.
+HookRelay now uses the **transactional outbox pattern**. The ingestion handler writes both the `Event` row and an `OutboxEntry` row in a single DB transaction. The `outbox` table is PostgreSQL, so this write is atomic — either both rows land or neither does. A dedicated `OutboxRelay` coroutine polls the `outbox` table with `SELECT … FOR UPDATE SKIP LOCKED`, publishes each entry to Kafka, and deletes the row after a successful publish.
 
-This trade-off is deliberate: DB commit failures are orders of magnitude rarer than Kafka failures, and both failure modes have safe recovery paths. The alternative — an outbox table committed in the same transaction, with a background publisher retrying — eliminates the dual-write gap entirely but adds a polling process, distributed locking (`FOR UPDATE SKIP LOCKED`), and a new table. That operational complexity is not justified given the rarity of the failure and the acceptable recovery behaviour.
+This eliminates the dual-write gap entirely. The only failure mode is: the relay crashes after publishing but before deleting the outbox row. On restart, it re-publishes the same event, producing a duplicate Kafka message. The delivery worker's idempotency check (`DeliveryAttempt` lookup before HTTP call) suppresses the duplicate — giving at-least-once delivery with no message loss.
+
+`FOR UPDATE SKIP LOCKED` means multiple relay instances running simultaneously (e.g. during a rolling restart) never double-publish the same row concurrently — each instance claims a distinct subset of rows.
 
 ### Why does Alembic use the async engine instead of a separate psycopg2 engine?
 

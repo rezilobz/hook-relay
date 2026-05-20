@@ -10,7 +10,7 @@ from hookrelay import metrics
 from hookrelay.api.dependencies import DB, Producer, require_api_key
 from hookrelay.api.schemas.events import DeliveryAttemptResponse, EventCreate, EventResponse
 from hookrelay.config import settings
-from hookrelay.db.models import DeliveryAttempt, DLQEntry, Event
+from hookrelay.db.models import DeliveryAttempt, DLQEntry, Event, OutboxEntry
 
 router = APIRouter(
     prefix="/events",
@@ -20,8 +20,8 @@ router = APIRouter(
 
 
 @router.post("", response_model=EventResponse, status_code=201)
-async def ingest_event(body: EventCreate, db: DB, producer: Producer) -> Event:
-    # RETURNING only yields a row when the INSERT lands; conflict → None (no Kafka publish)
+async def ingest_event(body: EventCreate, db: DB) -> Event:
+    # RETURNING only yields a row when the INSERT lands; conflict → None (no outbox write)
     result = await db.execute(
         pg_insert(Event)
         .values(
@@ -40,10 +40,10 @@ async def ingest_event(body: EventCreate, db: DB, producer: Producer) -> Event:
     event = event_result.scalar_one()
 
     if inserted_id is not None:
-        # Publish before commit: if Kafka fails, the exception propagates and
-        # the transaction rolls back, so the event is never persisted without a
-        # worker signal.
-        await producer.publish(settings.kafka_topic_pending, {"event_id": str(event.id)})
+        # Write outbox row in the same transaction as the Event INSERT.
+        # The worker relay picks this up and publishes to Kafka, guaranteeing
+        # no message is lost even if this process crashes after commit.
+        db.add(OutboxEntry(event_id=event.id))
         metrics.events_ingested_total.inc()
 
     await db.commit()
@@ -86,14 +86,16 @@ async def get_event(event_id: uuid.UUID, db: DB) -> Event:
 
     if succeeded + exhausted + retrying == 0:
         event.status = "pending"
-    elif retrying > 0:
-        event.status = "pending" if succeeded == 0 else "partially_delivered"
-    elif succeeded > 0 and exhausted == 0:
+    elif succeeded == 0 and retrying > 0:
+        event.status = "retrying"
+    elif succeeded > 0 and exhausted == 0 and retrying == 0:
         event.status = "delivered"
-    elif exhausted > 0 and succeeded == 0:
-        event.status = "dlq"
-    else:
+    elif succeeded > 0 and retrying > 0:
+        event.status = "partially_retrying"
+    elif succeeded > 0 and exhausted > 0 and retrying == 0:
         event.status = "partially_delivered"
+    else:
+        event.status = "dlq"
 
     return event
 

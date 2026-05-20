@@ -51,8 +51,9 @@ test-cov: ## Run all tests with coverage report
 
 # ─── Infrastructure ───────────────────────────────────────────────────────────
 
-up: ## Start infrastructure services (postgres, kafka, prometheus, grafana)
-	docker compose up -d
+up: ## Build and start all services, then run database migrations
+	docker compose up -d --build --wait
+	$(UV) run alembic upgrade head
 
 down: ## Stop infrastructure services
 	docker compose down
@@ -60,8 +61,8 @@ down: ## Stop infrastructure services
 down-volumes: ## Stop services and delete all persistent data (destructive)
 	docker compose down -v
 
-logs: ## Tail logs for all infrastructure services
-	docker compose logs -f
+logs: ## Tail logs (use SVC="api worker" to filter by service)
+	docker compose logs -f $(SVC)
 
 # ─── Database ─────────────────────────────────────────────────────────────────
 
