@@ -114,6 +114,7 @@ def worker_session_factory(async_engine: AsyncEngine):
     with (
         patch("hookrelay.worker.delivery.AsyncSessionLocal", factory),
         patch("hookrelay.worker.dlq.AsyncSessionLocal", factory),
+        patch("hookrelay.worker.outbox.AsyncSessionLocal", factory),
     ):
         yield factory
 

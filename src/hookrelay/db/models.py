@@ -82,3 +82,21 @@ class DLQEntry(Base):
     )
     reason: Mapped[str] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+
+
+class OutboxEntry(Base):
+    """Transactional outbox: written atomically with the Event row, relayed to Kafka by the worker.
+
+    Guarantees no Kafka message is lost even if the API process crashes after committing the
+    Event INSERT. The relay polls this table and publishes, then deletes the row.
+    """
+
+    __tablename__ = "outbox"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
+    )
+    event_id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("events.id"), unique=True
+    )
+    created_at: Mapped[datetime] = mapped_column(server_default=func.now())

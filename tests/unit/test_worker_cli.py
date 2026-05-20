@@ -44,6 +44,7 @@ class TestWorkerCliRun:
             patch("hookrelay.worker_cli.AsyncSessionLocal", _fake_session_factory()),
             patch("hookrelay.worker_cli.run_delivery_loop", side_effect=_noop_loop),
             patch("hookrelay.worker_cli.run_scheduler", side_effect=_noop_loop),
+            patch("hookrelay.worker_cli.run_outbox_relay", side_effect=_noop_loop),
             patch("hookrelay.worker_cli.run_lag_reporter", side_effect=_noop_loop),
         ):
             await _run()
@@ -126,6 +127,7 @@ class TestWorkerCliRun:
             patch("hookrelay.worker_cli.AsyncSessionLocal", _fake_session_factory(dlq_count=7)),
             patch("hookrelay.worker_cli.run_delivery_loop", side_effect=_noop_loop),
             patch("hookrelay.worker_cli.run_scheduler", side_effect=_noop_loop),
+            patch("hookrelay.worker_cli.run_outbox_relay", side_effect=_noop_loop),
             patch("hookrelay.worker_cli.run_lag_reporter", side_effect=_noop_loop),
         ):
             await _run()

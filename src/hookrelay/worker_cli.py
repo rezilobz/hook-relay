@@ -13,6 +13,7 @@ from hookrelay.kafka.consumer import HookRelayConsumer
 from hookrelay.kafka.producer import HookRelayProducer
 from hookrelay.worker.delivery import run_delivery_loop
 from hookrelay.worker.lag_reporter import run_lag_reporter
+from hookrelay.worker.outbox import run_outbox_relay
 from hookrelay.worker.retry import RedisRetryScheduler
 from hookrelay.worker.scheduler import run_scheduler
 
@@ -49,6 +50,7 @@ async def _run() -> None:
         async with asyncio.TaskGroup() as tg:
             tg.create_task(run_delivery_loop(consumer, producer, scheduler))
             tg.create_task(run_scheduler(producer, scheduler))
+            tg.create_task(run_outbox_relay(producer))
             tg.create_task(run_lag_reporter(consumer))
     finally:
         log.info("worker.stopping")
