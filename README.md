@@ -39,44 +39,36 @@ HookRelay solves these problems with a Kafka-backed architecture purpose-built f
 ```
                         ┌─────────────────────────────────────────────────────┐
                         │                    HookRelay                        │
-                        │                                                     │
   Your Application      │  ┌─────────────┐                                    │
-        │               │  │             │  INSERT event                      │
-        │  POST /events │  │   FastAPI   │  INSERT outbox  ┌────────────────┐ │
-        └──────────────►│  │  Ingestion  ├────────────────►│   PostgreSQL   │ │
-                        │  │   API       │  (same tx)      │                │ │
-                        │  └─────────────┘                 │  endpoints     │ │
+        │               │  │  FastAPI    │  INSERT event                      │
+        │  POST /events │  │  Ingestion  │  INSERT outbox  ┌────────────────┐ │
+        └───────────────┼─►│  API        ├────────────────►│   PostgreSQL   │ │
+                        │  └─────────────┘  (same tx)      │                │ │
+                        │                                  │  endpoints     │ │
                         │                                  │  events        │ │
                         │  ┌─────────────┐  poll outbox    │  outbox        │ │
                         │  │   Outbox    │◄────────────────│  deliveries    │ │
-                        │  │   Relay     │  delete row      │  dlq          │ │
+                        │  │   Relay     │  delete row     │  dlq           │ │
                         │  └──────┬──────┘  (after pub)    └───────▲────────┘ │
                         │         │ publish                        │          │
-                        │         ▼                                │          │
-                        │  ┌───────────────────────────┐           │          │
+                        │  ┌──────▼────────────────────┐           │          │
                         │  │     Kafka Topics          │           │          │
                         │  │  hookrelay.events.pending │           │          │
                         │  │  hookrelay.events.dlq     │           │          │
                         │  └──────────┬────────────────┘           │          │
                         │             │                            │          │
                         │  ┌──────────▼───────────────┐            │          │
-                        │  │                          │            │          │
                         │  │   Delivery Worker Pool   ├────────────┘          │
-                        │  │                          │  write attempts       │
-                        │  │  ┌────────────────────┐  │                       │
+                        │  │  ┌────────────────────┐  │  write attempts       │
                         │  │  │  Retry Scheduler   │  │                       │
                         │  │  │  (Redis ZSET)      │  │                       │
                         │  │  └────────────────────┘  │                       │
-                        │  │                          │                       │
                         │  │  ┌────────────────────┐  │                       │
                         │  │  │  DLQ Handler       │  │                       │
                         │  │  └────────────────────┘  │                       │
-                        │  │                          │                       │
                         │  └──────────┬───────────────┘                       │
-                        │             │  HTTPS POST                           │
-                        │             ▼                                       │
-                        │    Customer Endpoint                                │
-                        │                                                     │
+                        │             │                                       │
+                        │             └───── HTTPS POST ──────────────────────┼──► Customer Endpoint
                         │  ┌─────────────┐  ┌─────────────┐                   │
                         │  │  Prometheus │  │    Redis    │  retry ZSET       │
                         │  │  + Grafana  │  │    (AOF)    │  scheduler        │
