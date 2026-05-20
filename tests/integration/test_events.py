@@ -131,7 +131,6 @@ class TestOutboxRelay:
 
         await _relay_batch(fake_producer)
 
-        await db.expire_all()
         result = await db.execute(select(OutboxEntry).where(OutboxEntry.event_id == event_id))
         assert result.scalar_one_or_none() is None
 
@@ -295,7 +294,7 @@ class TestRetryEvent:
         result = await db.execute(select(DLQEntry).where(DLQEntry.event_id == eid))
         assert result.scalars().all() == []
 
-    async def test_derived_status_is_pending_after_retry_from_dlq(
+    async def test_derived_status_is_retrying_after_retry_from_dlq(
         self, client: AsyncClient, db: AsyncSession, fake_producer: FakeProducer
     ) -> None:
         created = await _ingest(client)
@@ -307,7 +306,7 @@ class TestRetryEvent:
         await client.post(f"/events/{created['id']}/retry", headers=AUTH)
         resp = await client.get(f"/events/{created['id']}", headers=AUTH)
 
-        assert resp.json()["status"] == "pending"
+        assert resp.json()["status"] == "retrying"
 
 
 # ─── GET /events/{id} — derived status ───────────────────────────────────────
