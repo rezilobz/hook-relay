@@ -236,7 +236,7 @@ class TestRunScheduler:
                 return [msg]
 
             async def cancel(self, eid: uuid.UUID, epid: uuid.UUID, attempt_number: int) -> None:
-                cancelled.append((eid, epid))
+                cancelled.append((eid, epid, attempt_number))
 
         with patch("hookrelay.worker.scheduler.asyncio.sleep", side_effect=mock_sleep):
             with pytest.raises(RuntimeError, match="Kafka unavailable"):
